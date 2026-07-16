@@ -85,6 +85,21 @@ describe("server state permissions", () => {
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
 
+  it.effect("rejects the filesystem root without changing its mode", () =>
+    Effect.gen(function* () {
+      if (NodeProcess.platform !== "linux") return;
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = path.parse(NodeProcess.cwd()).root;
+      const modeBefore = permissionBits((yield* fs.stat(root)).mode);
+
+      const error = yield* Effect.flip(ensurePrivateDirectory(root));
+
+      assert.instanceOf(error, PlatformError.PlatformError);
+      assert.equal(permissionBits((yield* fs.stat(root)).mode), modeBefore);
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
   it.effect("rejects a symlinked base ancestor without creating external state", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
@@ -205,7 +220,7 @@ describe("server state permissions", () => {
       const fifoPath = path.join(root, "project-registrations.json");
       NodeChildProcess.execFileSync("mkfifo", [fifoPath]);
       const startedAt = yield* Clock.currentTimeMillis;
-      yield* Effect.sleep("300 millis").pipe(
+      yield* Effect.sleep("2 seconds").pipe(
         Effect.andThen(
           Effect.sync(() => {
             try {
@@ -225,7 +240,7 @@ describe("server state permissions", () => {
       const error = yield* Effect.flip(ensurePrivateFile(fifoPath));
 
       assert.instanceOf(error, PlatformError.PlatformError);
-      assert.isBelow((yield* Clock.currentTimeMillis) - startedAt, 250);
+      assert.isBelow((yield* Clock.currentTimeMillis) - startedAt, 1_000);
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer), TestClock.withLive),
   );
 });

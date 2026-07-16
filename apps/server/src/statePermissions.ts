@@ -41,6 +41,16 @@ const platformError = (method: string, path: string, cause: unknown) => {
   });
 };
 
+type NodeFileHandle = Awaited<ReturnType<typeof NodeFSP.open>>;
+const closedHandles = new WeakSet<NodeFileHandle>();
+
+const closeHandle = (handle: NodeFileHandle) =>
+  Effect.suspend(() => {
+    if (closedHandles.has(handle)) return Effect.void;
+    closedHandles.add(handle);
+    return Effect.promise(() => handle.close()).pipe(Effect.ignore);
+  });
+
 interface EnsurePathModeInput {
   readonly path: string;
   readonly expectedType: "Directory" | "File";
@@ -55,7 +65,7 @@ const openScoped = (openPath: string, flags: number, reportedPath: string) =>
       try: () => NodeFSP.open(openPath, flags),
       catch: (cause) => platformError("open", reportedPath, cause),
     }),
-    (handle) => Effect.promise(() => handle.close()).pipe(Effect.ignore),
+    closeHandle,
   );
 
 const openLinuxPathWithoutSymlinks = Effect.fn("StatePermissions.openLinuxPathWithoutSymlinks")(
@@ -74,6 +84,13 @@ const openLinuxPathWithoutSymlinks = Effect.fn("StatePermissions.openLinuxPathWi
       .slice(parsedPath.root.length)
       .split(NodePath.sep)
       .filter((component) => component.length > 0);
+    if (components.length === 0) {
+      return yield* PlatformError.badArgument({
+        module: "FileSystem",
+        method: "open",
+        description: "Server-owned state paths must not be the filesystem root.",
+      });
+    }
     let currentHandle = yield* openScoped(
       parsedPath.root,
       NodeFS.constants.O_RDONLY | NodeFS.constants.O_DIRECTORY,
@@ -118,6 +135,7 @@ const openLinuxPathWithoutSymlinks = Effect.fn("StatePermissions.openLinuxPathWi
         }
         return yield* result.failure;
       }
+      yield* closeHandle(currentHandle);
       currentHandle = result.success;
     }
 
