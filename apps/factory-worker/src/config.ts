@@ -4,6 +4,8 @@ import * as NodePath from "node:path";
 
 import { MAX_LEASE_MILLISECONDS, WorkflowEngineError } from "@mkcode/workflow-engine";
 
+import { MIN_SIMULATION_LEASE_MILLISECONDS } from "./simulationWorker.ts";
+
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "::1", "localhost"]);
 const MAX_TIMER_MILLISECONDS = 2_147_483_647;
 
@@ -86,10 +88,20 @@ export function resolveFactoryWorkerConfig(input: FactoryWorkerConfigInput): Fac
     input.leaseMilliseconds ?? 30_000,
     "Factory worker lease duration",
   );
-  if (leaseMilliseconds > MAX_LEASE_MILLISECONDS) {
+  if (
+    leaseMilliseconds < MIN_SIMULATION_LEASE_MILLISECONDS ||
+    leaseMilliseconds > MAX_LEASE_MILLISECONDS
+  ) {
     throw new WorkflowEngineError(
       "invalid_request",
-      `Factory worker lease duration must not exceed ${MAX_LEASE_MILLISECONDS} milliseconds.`,
+      `Factory worker lease duration must be between ${MIN_SIMULATION_LEASE_MILLISECONDS} and ${MAX_LEASE_MILLISECONDS} milliseconds.`,
+    );
+  }
+  const workerInstanceId = (input.workerInstanceId ?? `factory-${process.pid}`).trim();
+  if (workerInstanceId.length === 0) {
+    throw new WorkflowEngineError(
+      "invalid_request",
+      "Factory worker instance ID must not be empty.",
     );
   }
   const shutdownGraceMilliseconds = requirePositiveSafeInteger(
@@ -110,7 +122,7 @@ export function resolveFactoryWorkerConfig(input: FactoryWorkerConfigInput): Fac
       ? NodePath.resolve(stateDirectory, input.databasePath)
       : NodePath.join(stateDirectory, "factory.sqlite"),
     credential,
-    workerInstanceId: input.workerInstanceId ?? `factory-${process.pid}`,
+    workerInstanceId,
     pollIntervalMilliseconds,
     leaseMilliseconds,
     shutdownGraceMilliseconds,
@@ -140,9 +152,10 @@ export function configFromEnvironment(
     ...(environment.MKCODE_FACTORY_DATABASE_PATH
       ? { databasePath: environment.MKCODE_FACTORY_DATABASE_PATH }
       : {}),
-    ...(environment.MKCODE_FACTORY_WORKER_ID
-      ? { workerInstanceId: environment.MKCODE_FACTORY_WORKER_ID }
-      : {}),
+    ...(() => {
+      const workerInstanceId = environment.MKCODE_FACTORY_WORKER_ID?.trim();
+      return workerInstanceId ? { workerInstanceId } : {};
+    })(),
     ...(environment.MKCODE_FACTORY_POLL_MS !== undefined
       ? {
           pollIntervalMilliseconds: parseEnvironmentInteger(

@@ -141,4 +141,46 @@ describe("factory control plane", () => {
       if (result._tag === "Failure") NodeAssert.equal(result.failure, conflict);
     }),
   );
+
+  it.effect("reports a project disabled during revalidation as disabled", () =>
+    Effect.gen(function* () {
+      const stored = registration("stored-digest");
+      const disabled = {
+        ...stored,
+        enabled: false,
+        validationStatus: "disabled" as const,
+      };
+      const registry = ProjectRegistry.ProjectRegistry.of({
+        register: () => Effect.succeed(stored),
+        list: Effect.succeed([stored]),
+        read: () => Effect.succeed(stored),
+        validate: () => Effect.succeed(disabled),
+        disable: () => Effect.succeed(disabled),
+        enable: () => Effect.succeed(stored),
+      });
+      const client = {
+        createWorkflow: () => NodeAssert.fail("Disabled project must not reach the worker."),
+      } as unknown as FactoryWorkerClient;
+
+      const result = yield* Effect.result(
+        createRegisteredProjectWorkflow(client, {
+          projectId: "project-1",
+          idempotencyKey: "request-disabled-race",
+          title: "Title",
+          description: "Description",
+          source: "manual",
+          workflowType: "feature",
+          requestedBy: "operator",
+        }),
+      ).pipe(Effect.provideService(ProjectRegistry.ProjectRegistry, registry));
+
+      NodeAssert.equal(result._tag, "Failure");
+      if (result._tag !== "Failure") NodeAssert.fail("Expected disabled project failure.");
+      NodeAssert.ok(isFactoryControlPlaneError(result.failure));
+      if (!isFactoryControlPlaneError(result.failure)) {
+        NodeAssert.fail("Expected a FactoryControlPlaneError.");
+      }
+      NodeAssert.equal(result.failure.code, "project_disabled");
+    }),
+  );
 });

@@ -269,6 +269,26 @@ describe("factory worker API", () => {
         }),
       );
     }
+    NodeAssert.throws(() =>
+      resolveFactoryWorkerConfig({
+        credential,
+        leaseMilliseconds: 99,
+      }),
+    );
+    NodeAssert.equal(
+      configFromEnvironment({
+        MKCODE_FACTORY_TOKEN: credential,
+        MKCODE_FACTORY_WORKER_ID: "   ",
+      }).workerInstanceId.startsWith("factory-"),
+      true,
+    );
+    NodeAssert.equal(
+      configFromEnvironment({
+        MKCODE_FACTORY_TOKEN: credential,
+        MKCODE_FACTORY_WORKER_ID: "  worker-trimmed  ",
+      }).workerInstanceId,
+      "worker-trimmed",
+    );
     for (const invalidValue of ["", "4317junk", "1.5", "1e3", " 4317"]) {
       for (const variable of [
         "MKCODE_FACTORY_PORT",

@@ -3,6 +3,8 @@ import * as NodeTimers from "node:timers";
 
 import type { ClaimedJob, WorkflowEngine } from "@mkcode/workflow-engine";
 
+export const MIN_SIMULATION_LEASE_MILLISECONDS = 100;
+
 export type SimulationOutcome =
   | { readonly kind: "success"; readonly metadata?: Readonly<Record<string, unknown>> }
   | {
@@ -57,6 +59,14 @@ export class SimulationWorker {
     readonly leaseMilliseconds: number;
     readonly handler?: SimulationHandler;
   }) {
+    if (
+      !Number.isSafeInteger(input.leaseMilliseconds) ||
+      input.leaseMilliseconds < MIN_SIMULATION_LEASE_MILLISECONDS
+    ) {
+      throw new TypeError(
+        `Simulation lease must be at least ${MIN_SIMULATION_LEASE_MILLISECONDS} milliseconds.`,
+      );
+    }
     this.#engine = input.engine;
     this.#workerInstanceId = input.workerInstanceId;
     this.#leaseMilliseconds = input.leaseMilliseconds;

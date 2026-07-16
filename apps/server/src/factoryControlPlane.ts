@@ -54,6 +54,11 @@ export const createRegisteredProjectWorkflow = Effect.fn(
     });
   }
   const registration = yield* registry.validate(input.projectId);
+  if (!registration.enabled) {
+    return yield* new FactoryControlPlaneError({
+      code: "project_disabled",
+    });
+  }
   if (registration.validationStatus !== "valid") {
     return yield* new FactoryControlPlaneError({
       code: "project_unavailable",

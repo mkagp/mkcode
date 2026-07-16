@@ -14,11 +14,11 @@ const sortValue = (value: unknown): unknown => {
 };
 
 export const canonicalJson = (value: unknown): string => {
-  const encoded = JSON.stringify(sortValue(value));
-  if (encoded === undefined) {
+  const initial = JSON.stringify(value);
+  if (initial === undefined) {
     throw new TypeError("Canonical JSON requires a JSON-representable root value.");
   }
-  return encoded;
+  return JSON.stringify(sortValue(JSON.parse(initial) as unknown));
 };
 
 export const digestJson = (value: unknown): string =>
