@@ -179,6 +179,14 @@ command, or create a worktree. No browser project-management UI consumes these
 methods yet; the current proof is the WebSocket integration test in
 `apps/server/src/server.test.ts`.
 
+Server startup narrows each explicitly derived state directory to `0700` on the
+verified Linux target. Project-registry reads and atomic replacements enforce
+`0600` on `project-registrations.json`; the atomic temporary file is also
+`0600`. Permission enforcement rejects symlink state paths and does not recurse
+into external repositories. Revalidation checks the stored repository path,
+directory type, and Git marker before loading `.mkcode/project.yaml`, keeping
+repository availability errors distinct from configuration `file_missing`.
+
 ```mermaid
 sequenceDiagram
     actor User

@@ -4417,6 +4417,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       const repository = yield* fs.makeTempDirectoryScoped({
         prefix: "mkcode-ws-project-registry-",
       });
+      const movedRepository = `${repository}-moved`;
       yield* fs.makeDirectory(path.join(repository, ".git"));
       yield* fs.makeDirectory(path.join(repository, ".mkcode"));
       yield* fs.writeFileString(
@@ -4452,7 +4453,14 @@ execution:
             const read = yield* client[WS_METHODS.projectRegistryRead]({
               projectId: registered.projectId,
             });
-            return { registered, listed, disabled, enabled, read };
+            yield* fs.rename(repository, movedRepository);
+            const unavailable = yield* client[WS_METHODS.projectRegistryValidate]({
+              projectId: registered.projectId,
+            }).pipe(Effect.ensuring(fs.rename(movedRepository, repository).pipe(Effect.orDie)));
+            const restored = yield* client[WS_METHODS.projectRegistryValidate]({
+              projectId: registered.projectId,
+            });
+            return { registered, listed, disabled, enabled, read, unavailable, restored };
           }),
         ),
       );
@@ -4462,6 +4470,13 @@ execution:
       assert.equal(response.disabled.validationStatus, "disabled");
       assert.equal(response.enabled.validationStatus, "valid");
       assert.equal(response.read.configurationDigest, response.registered.configurationDigest);
+      assert.equal(response.unavailable.validationStatus, "invalid");
+      assert.equal(response.unavailable.validationErrors[0]?.code, "repository_not_found");
+      assert.equal(
+        response.unavailable.configurationDigest,
+        response.registered.configurationDigest,
+      );
+      assert.equal(response.restored.validationStatus, "valid");
     }).pipe(Effect.provide(NodeHttpServer.layerTest), TestClock.withLive),
   );
 

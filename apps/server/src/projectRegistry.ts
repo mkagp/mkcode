@@ -1,5 +1,6 @@
 import {
   loadProjectConfiguration,
+  type ProjectConfigIssue,
   type ResolvedProjectConfiguration,
 } from "@mkcode/project-config";
 import {
@@ -21,6 +22,7 @@ import * as Semaphore from "effect/Semaphore";
 
 import { writeFileStringAtomically } from "./atomicWrite.ts";
 import * as ServerConfig from "./config.ts";
+import { ensurePrivateFile, PRIVATE_FILE_MODE } from "./statePermissions.ts";
 
 const ProjectRegistrationStore = Schema.Struct({
   version: Schema.Literal(1),
@@ -75,6 +77,15 @@ export const make = Effect.gen(function* () {
     );
 
   const readStore = Effect.fn("ProjectRegistry.readStore")(function* () {
+    yield* ensurePrivateFile(config.projectRegistrationsPath).pipe(
+      Effect.mapError(() =>
+        registrationError({
+          failure: "persistence_failed",
+          message: "Could not secure the project registration store.",
+          validationErrors: [],
+        }),
+      ),
+    );
     const raw = yield* fs.readFileString(config.projectRegistrationsPath).pipe(
       Effect.matchEffect({
         onFailure: (cause) =>
@@ -124,6 +135,7 @@ export const make = Effect.gen(function* () {
     yield* writeFileStringAtomically({
       filePath: config.projectRegistrationsPath,
       contents: `${encoded}\n`,
+      mode: PRIVATE_FILE_MODE,
     }).pipe(
       Effect.provideService(FileSystem.FileSystem, fs),
       Effect.provideService(Path.Path, path),
@@ -192,6 +204,61 @@ export const make = Effect.gen(function* () {
     }
     return canonical;
   });
+
+  const projectConfigIssue = (issue: ProjectConfigIssue): ProjectConfigIssue => issue;
+
+  const inspectRegisteredRepository = Effect.fn("ProjectRegistry.inspectRegisteredRepository")(
+    function* (repositoryPath: string): Effect.fn.Return<void, ProjectConfigIssue> {
+      const repositoryInfo = yield* Effect.result(fs.stat(repositoryPath));
+      if (repositoryInfo._tag === "Failure") {
+        return yield* Effect.fail(
+          projectConfigIssue({
+            code:
+              repositoryInfo.failure.reason._tag === "NotFound"
+                ? "repository_not_found"
+                : "read_failed",
+            path: "repositoryPath",
+            message:
+              repositoryInfo.failure.reason._tag === "NotFound"
+                ? "The registered repository path is unavailable."
+                : "The registered repository path could not be inspected.",
+          }),
+        );
+      }
+      if (repositoryInfo.success.type !== "Directory") {
+        return yield* Effect.fail(
+          projectConfigIssue({
+            code: "repository_not_directory",
+            path: "repositoryPath",
+            message: "The registered repository path is not a directory.",
+          }),
+        );
+      }
+
+      const gitInfo = yield* Effect.result(fs.stat(path.join(repositoryPath, ".git")));
+      if (gitInfo._tag === "Failure") {
+        return yield* Effect.fail(
+          projectConfigIssue({
+            code: gitInfo.failure.reason._tag === "NotFound" ? "repository_not_git" : "read_failed",
+            path: "repositoryPath",
+            message:
+              gitInfo.failure.reason._tag === "NotFound"
+                ? "The registered path is not a Git repository."
+                : "The registered repository could not be inspected.",
+          }),
+        );
+      }
+      if (gitInfo.success.type !== "Directory" && gitInfo.success.type !== "File") {
+        return yield* Effect.fail(
+          projectConfigIssue({
+            code: "repository_not_git",
+            path: "repositoryPath",
+            message: "The registered path is not a Git repository.",
+          }),
+        );
+      }
+    },
+  );
 
   const registrationFromSnapshot = (input: {
     readonly snapshot: ResolvedProjectConfiguration;
@@ -317,9 +384,15 @@ export const make = Effect.gen(function* () {
   ) {
     const enabled = forceEnabled ?? existing.enabled;
     const validatedAt = yield* nowIso;
-    const result = yield* Effect.result(loadConfiguration(existing.repositoryPath));
+    const repositoryResult = yield* Effect.result(
+      inspectRegisteredRepository(existing.repositoryPath),
+    );
+    const result =
+      repositoryResult._tag === "Success"
+        ? yield* Effect.result(loadConfiguration(existing.repositoryPath))
+        : undefined;
     let next: ProjectRegistrationType;
-    if (result._tag === "Success" && result.success.project.id === existing.projectId) {
+    if (result?._tag === "Success" && result.success.project.id === existing.projectId) {
       next = registrationFromSnapshot({
         snapshot: result.success,
         repositoryPath: existing.repositoryPath,
@@ -332,16 +405,18 @@ export const make = Effect.gen(function* () {
       });
     } else {
       const validationErrors =
-        result._tag === "Failure"
-          ? [...result.failure.issues]
-          : [
-              {
-                code: "invalid_project_id" as const,
-                path: "project.id",
-                message:
-                  "A registered project's stable project id cannot change during revalidation.",
-              },
-            ];
+        repositoryResult._tag === "Failure"
+          ? [repositoryResult.failure]
+          : result?._tag === "Failure"
+            ? [...result.failure.issues]
+            : [
+                {
+                  code: "invalid_project_id" as const,
+                  path: "project.id",
+                  message:
+                    "A registered project's stable project id cannot change during revalidation.",
+                },
+              ];
       next = {
         ...existing,
         enabled,

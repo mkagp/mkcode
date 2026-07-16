@@ -59,6 +59,15 @@ the parser never reads the corresponding process environment. Registration
 stores no resolved secret values and performs no command, Git, worktree, or
 repository write operation.
 
+On Linux, the server explicitly applies mode `0700` to each server-owned state
+directory and mode `0600` to the project-registration store and its atomic-write
+temporary file. Existing broader registration-file permissions are narrowed on
+read or rewrite when the server can do so as the current owner. The permission
+helper rejects symbolic-link paths before `chmod` and never recursively changes
+registered repositories or unrelated directories. This is host hardening, not
+a portable access-control abstraction; equivalent Windows behavior has not been
+verified.
+
 Artifact and worktree paths may not exist at validation time and therefore have
 lexical containment only. A future command/workspace implementation must repeat
 canonical parent/final-path checks at the moment of creation or use. Structured

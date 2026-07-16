@@ -137,6 +137,9 @@ export const ProjectConfigIssueCode = Schema.Literals([
   "path_not_directory",
   "path_not_file",
   "path_symlink_escape",
+  "repository_not_found",
+  "repository_not_directory",
+  "repository_not_git",
   "read_failed",
   "digest_failed",
 ]);

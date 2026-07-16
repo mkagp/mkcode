@@ -171,6 +171,14 @@ versioned, atomically replaced JSON file owned only by
 - browser-editable `settings.json`; and
 - the future worker-owned factory database.
 
+On the currently verified Linux deployment, server-owned state directories are
+created or narrowed to mode `0700`. The registration store and its atomic-write
+temporary file are created or narrowed to `0600`; replacement writes restore
+that final mode. Permission enforcement checks the exact owned path and rejects
+symbolic links rather than applying `chmod` through them. It does not recursively
+change parent directories, registered repositories, or unrelated paths. Windows
+permission semantics remain unverified.
+
 A registration records project ID, canonical absolute repository path,
 enabled/disabled state, optional display override, added/last-validated times,
 validation status, configuration location and digest, the last resolved
@@ -183,6 +191,14 @@ becomes invalid, the registration retains its last valid snapshot and digest,
 records current validation errors, and becomes `invalid` (or remains `disabled`).
 Enabling a project performs revalidation. Changing `project.id` is rejected as
 an identity change rather than silently re-keying the record.
+
+Before configuration discovery, revalidation checks the stored repository path
+in order: present, directory, and Git repository. It reports
+`repository_not_found`, `repository_not_directory`, or `repository_not_git` as a
+structured current validation issue. Only a valid Git repository can proceed to
+the existing configuration `file_missing` result. `list` and `read` remain safe
+and continue to expose the historical snapshot while the current status is
+invalid; restoring the path permits normal revalidation.
 
 Authenticated WebSocket methods are:
 

@@ -156,6 +156,127 @@ describe("project registry", () => {
     ),
   );
 
+  it.effect(
+    "reports a moved repository before configuration discovery and recovers after restore",
+    () =>
+      withRegistry(
+        Effect.gen(function* () {
+          const fs = yield* FileSystem.FileSystem;
+          const root = yield* makeRepository();
+          const moved = `${root}-moved`;
+          const registry = yield* ProjectRegistryModule.ProjectRegistry;
+          const initial = yield* registry.register({ repositoryPath: root });
+          yield* fs.rename(root, moved);
+          yield* Effect.gen(function* () {
+            const unavailable = yield* registry.validate("registered-project");
+            assert.equal(unavailable.validationStatus, "invalid");
+            assert.equal(unavailable.validationErrors[0]?.code, "repository_not_found");
+            assert.equal(unavailable.configurationDigest, initial.configurationDigest);
+            assert.equal((yield* registry.read("registered-project")).validationStatus, "invalid");
+            assert.equal((yield* registry.list).length, 1);
+            assert.isFalse(yield* fs.exists(root));
+          }).pipe(Effect.ensuring(fs.rename(moved, root).pipe(Effect.orDie)));
+
+          const restored = yield* registry.validate("registered-project");
+          assert.equal(restored.validationStatus, "valid");
+          assert.equal(restored.validationErrors.length, 0);
+        }),
+      ),
+  );
+
+  it.effect("reports a deleted repository while retaining the last valid snapshot", () =>
+    withRegistry(
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const root = yield* makeRepository();
+        const registry = yield* ProjectRegistryModule.ProjectRegistry;
+        const initial = yield* registry.register({ repositoryPath: root });
+        yield* fs.remove(root, { recursive: true });
+        yield* Effect.gen(function* () {
+          const unavailable = yield* registry.validate("registered-project");
+          assert.equal(unavailable.validationStatus, "invalid");
+          assert.equal(unavailable.validationErrors[0]?.code, "repository_not_found");
+          assert.equal(unavailable.configurationDigest, initial.configurationDigest);
+          assert.isFalse(yield* fs.exists(root));
+        }).pipe(Effect.ensuring(fs.makeDirectory(root).pipe(Effect.orDie)));
+      }),
+    ),
+  );
+
+  it.effect("reports when a registered repository path is replaced by a file", () =>
+    withRegistry(
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const root = yield* makeRepository();
+        const moved = `${root}-moved`;
+        const registry = yield* ProjectRegistryModule.ProjectRegistry;
+        const initial = yield* registry.register({ repositoryPath: root });
+        yield* fs.rename(root, moved);
+        yield* fs.writeFileString(root, "not a directory");
+
+        const unavailable = yield* registry.validate("registered-project");
+        assert.equal(unavailable.validationStatus, "invalid");
+        assert.equal(unavailable.validationErrors[0]?.code, "repository_not_directory");
+        assert.equal(unavailable.configurationDigest, initial.configurationDigest);
+
+        yield* fs.remove(root);
+        yield* fs.rename(moved, root);
+        assert.equal((yield* registry.validate("registered-project")).validationStatus, "valid");
+      }),
+    ),
+  );
+
+  it.effect("reports when a registered repository path is replaced by a non-Git directory", () =>
+    withRegistry(
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const root = yield* makeRepository();
+        const moved = `${root}-moved`;
+        const registry = yield* ProjectRegistryModule.ProjectRegistry;
+        const initial = yield* registry.register({ repositoryPath: root });
+        yield* fs.rename(root, moved);
+        yield* fs.makeDirectory(root);
+
+        const unavailable = yield* registry.validate("registered-project");
+        assert.equal(unavailable.validationStatus, "invalid");
+        assert.equal(unavailable.validationErrors[0]?.code, "repository_not_git");
+        assert.equal(unavailable.configurationDigest, initial.configurationDigest);
+
+        yield* fs.remove(root, { recursive: true });
+        yield* fs.rename(moved, root);
+        assert.equal((yield* registry.validate("registered-project")).validationStatus, "valid");
+      }),
+    ),
+  );
+
+  it.effect("reports a missing configuration only after confirming the repository is valid", () =>
+    withRegistry(
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = yield* makeRepository();
+        const registry = yield* ProjectRegistryModule.ProjectRegistry;
+        const initial = yield* registry.register({ repositoryPath: root });
+        const configurationPath = path.join(root, ".mkcode", "project.yaml");
+        const moved = `${root}-moved`;
+        yield* fs.remove(configurationPath);
+        yield* fs.rename(root, moved);
+
+        const unavailable = yield* registry.validate("registered-project");
+        assert.equal(unavailable.validationStatus, "invalid");
+        assert.equal(unavailable.validationErrors[0]?.code, "repository_not_found");
+        assert.equal(unavailable.configurationDigest, initial.configurationDigest);
+
+        yield* fs.rename(moved, root);
+        const missingConfiguration = yield* registry.validate("registered-project");
+        assert.equal(missingConfiguration.validationStatus, "invalid");
+        assert.equal(missingConfiguration.validationErrors[0]?.code, "file_missing");
+        assert.equal(missingConfiguration.configurationDigest, initial.configurationDigest);
+        assert.isFalse(yield* fs.exists(configurationPath));
+      }),
+    ),
+  );
+
   it.effect("keeps disabled projects disabled across validation and revalidates on enable", () =>
     withRegistry(
       Effect.gen(function* () {
@@ -185,11 +306,16 @@ describe("project registry", () => {
         const registry = yield* ProjectRegistryModule.ProjectRegistry;
         yield* registry.register({ repositoryPath: root });
       }).pipe(Effect.provide(makeRegistryLayer(baseDir)));
+      const paths = yield* ServerConfig.deriveServerPaths(baseDir, undefined);
+      const persisted = yield* fs.stat(paths.projectRegistrationsPath);
+      assert.equal(persisted.mode & 0o777, 0o600);
+      yield* fs.chmod(paths.projectRegistrationsPath, 0o664);
       const loaded = yield* Effect.gen(function* () {
         const registry = yield* ProjectRegistryModule.ProjectRegistry;
         return yield* registry.read("registered-project");
       }).pipe(Effect.provide(makeRegistryLayer(baseDir)));
       assert.equal(loaded.repositoryPath, root);
+      assert.equal((yield* fs.stat(paths.projectRegistrationsPath)).mode & 0o777, 0o600);
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
 });
