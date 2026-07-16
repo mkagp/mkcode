@@ -3,9 +3,11 @@
 // @effect-diagnostics globalConsole:off -- This file owns the imperative process loop.
 import type * as NodeHttp from "node:http";
 
+import { DeterministicCommandRunner } from "@mkcode/command-runner";
 import { WorkflowEngine } from "@mkcode/workflow-engine";
 
 import { createFactoryApiServer } from "./api.ts";
+import { CommandExecutionWorker } from "./commandWorker.ts";
 import type { FactoryWorkerConfig } from "./config.ts";
 import { SimulationWorker, type SimulationHandler } from "./simulationWorker.ts";
 
@@ -82,10 +84,23 @@ export async function startFactoryWorker(
     leaseMilliseconds: config.leaseMilliseconds,
     ...(handler ? { handler } : {}),
   });
+  const commandRunner = new DeterministicCommandRunner({
+    stateRoot: config.stateDirectory,
+    redactionValues: [config.credential],
+    protectedEnvironmentSources: new Set(["MKCODE_FACTORY_TOKEN"]),
+  });
+  const commandWorker = new CommandExecutionWorker({
+    engine,
+    runner: commandRunner,
+    workerInstanceId: config.workerInstanceId,
+    leaseMilliseconds: config.leaseMilliseconds,
+  });
   const server = createFactoryApiServer({
     engine,
     credential: config.credential,
     workerInstanceId: config.workerInstanceId,
+    outputStore: commandRunner.outputStore,
+    onWorkflowCancelled: (workflowRunId) => commandWorker.cancelWorkflow(workflowRunId),
   });
 
   try {
@@ -100,11 +115,19 @@ export async function startFactoryWorker(
   const interval = setInterval(() => {
     if (polling) return;
     polling = true;
-    currentPoll = simulationWorker
-      .runOnce()
+    currentPoll = Promise.resolve()
+      .then(async () => {
+        const claimed = engine.claimNextJob(config.workerInstanceId, config.leaseMilliseconds);
+        if (!claimed) return;
+        if (claimed.job.jobType === "command.execute") {
+          await commandWorker.runClaimed(claimed);
+        } else {
+          await simulationWorker.runClaimed(claimed);
+        }
+      })
       .then(() => undefined)
       .catch((cause: unknown) => {
-        console.error("Factory simulation job failed.", {
+        console.error("Factory job failed.", {
           error: cause instanceof Error ? cause.message : "unknown_error",
         });
       })
@@ -126,6 +149,7 @@ export async function startFactoryWorker(
       if (stopped) return;
       stopped = true;
       simulationWorker.stop();
+      commandWorker.stop();
       clearInterval(interval);
       await waitForPoll(currentPoll, config.shutdownGraceMilliseconds);
       try {

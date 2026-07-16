@@ -2,6 +2,7 @@
 import * as NodeCrypto from "node:crypto";
 import * as NodeHttp from "node:http";
 
+import type { CommandOutputStore } from "@mkcode/command-runner";
 import {
   ApprovalResolveRequest,
   FactoryApiVersion,
@@ -146,6 +147,8 @@ export function createFactoryApiServer(input: {
   readonly engine: WorkflowEngine;
   readonly credential: string;
   readonly workerInstanceId: string;
+  readonly outputStore?: CommandOutputStore;
+  readonly onWorkflowCancelled?: (workflowRunId: string) => void;
 }): NodeHttp.Server {
   return NodeHttp.createServer((request, response) => {
     void (async () => {
@@ -191,7 +194,67 @@ export function createFactoryApiServer(input: {
       const cancelMatch = /^\/v1\/workflows\/([^/]+)\/cancel$/u.exec(url.pathname);
       if (method === "POST" && cancelMatch?.[1]) {
         const body = decodeRequest(decodeCancel, await readJsonBody(request));
-        json(response, 200, input.engine.cancelWorkflow(decodeIdentifier(cancelMatch[1]), body));
+        const runId = decodeIdentifier(cancelMatch[1]);
+        const detail = input.engine.cancelWorkflow(runId, body);
+        input.onWorkflowCancelled?.(runId);
+        json(response, 200, detail);
+        return;
+      }
+
+      const commandMatch = /^\/v1\/commands\/([^/]+)$/u.exec(url.pathname);
+      if (method === "GET" && commandMatch?.[1]) {
+        json(response, 200, input.engine.readCommand(decodeIdentifier(commandMatch[1])));
+        return;
+      }
+
+      const commandOutputMatch = /^\/v1\/commands\/([^/]+)\/output$/u.exec(url.pathname);
+      if (method === "GET" && commandOutputMatch?.[1]) {
+        if (!input.outputStore) {
+          throw new WorkflowEngineError("internal_error", "Command output storage is unavailable.");
+        }
+        const command = input.engine.readCommand(decodeIdentifier(commandOutputMatch[1]));
+        const stream = url.searchParams.get("stream");
+        if (stream !== "stdout" && stream !== "stderr") {
+          throw new WorkflowEngineError(
+            "invalid_request",
+            "Command output stream must be stdout or stderr.",
+          );
+        }
+        const cursor = Number(url.searchParams.get("cursor") ?? "0");
+        const limit = Number(url.searchParams.get("limit") ?? "65536");
+        if (!Number.isSafeInteger(cursor) || cursor < 0 || !Number.isSafeInteger(limit)) {
+          throw new WorkflowEngineError("invalid_cursor", "Command output cursor is invalid.");
+        }
+        const locationReference =
+          stream === "stdout" ? command.stdoutArtifactReference : command.stderrArtifactReference;
+        if (!locationReference) {
+          throw new WorkflowEngineError("not_found", "Command output is not available.");
+        }
+        let page;
+        try {
+          page = await input.outputStore.readPage({ locationReference, cursor, limit });
+        } catch (cause) {
+          if (cause instanceof TypeError) {
+            throw new WorkflowEngineError("invalid_request", cause.message);
+          }
+          throw cause;
+        }
+        json(response, 200, {
+          commandRunId: command.id,
+          stream,
+          ...page,
+          truncated: stream === "stdout" ? command.stdoutTruncated : command.stderrTruncated,
+        });
+        return;
+      }
+
+      const commandCancelMatch = /^\/v1\/commands\/([^/]+)\/cancel$/u.exec(url.pathname);
+      if (method === "POST" && commandCancelMatch?.[1]) {
+        const body = decodeRequest(decodeCancel, await readJsonBody(request));
+        const command = input.engine.readCommand(decodeIdentifier(commandCancelMatch[1]));
+        const detail = input.engine.cancelWorkflow(command.workflowRunId, body);
+        input.onWorkflowCancelled?.(command.workflowRunId);
+        json(response, 200, detail);
         return;
       }
 

@@ -82,7 +82,11 @@ export class SimulationWorker {
     if (this.#stopping) return false;
     const claimed = this.#engine.claimNextJob(this.#workerInstanceId, this.#leaseMilliseconds);
     if (!claimed) return false;
+    await this.runClaimed(claimed);
+    return true;
+  }
 
+  async runClaimed(claimed: ClaimedJob): Promise<void> {
     let outcome: SimulationOutcome;
     const controller = new AbortController();
     this.#activeController = controller;
@@ -110,7 +114,7 @@ export class SimulationWorker {
           handler !== undefined &&
           !(await waitForSettlement(handler, abortGraceMilliseconds)))
       ) {
-        return true;
+        return;
       }
       this.#engine.failJob({
         jobId: claimed.job.id,
@@ -119,13 +123,13 @@ export class SimulationWorker {
         failureSummary: "Simulation handler failed unexpectedly.",
         expectedStageVersion: claimed.stageVersion,
       });
-      return true;
+      return;
     } finally {
       if (deadline) NodeTimers.clearTimeout(deadline);
       controller.abort();
       if (this.#activeController === controller) this.#activeController = undefined;
     }
-    if (this.#stopping) return true;
+    if (this.#stopping) return;
     if (outcome.kind === "success") {
       this.#engine.completeJob(
         claimed.job.id,
@@ -133,7 +137,7 @@ export class SimulationWorker {
         outcome.metadata ?? { simulated: true },
         claimed.stageVersion,
       );
-      return true;
+      return;
     }
     this.#engine.failJob({
       jobId: claimed.job.id,
@@ -148,6 +152,6 @@ export class SimulationWorker {
           }
         : {}),
     });
-    return true;
+    return;
   }
 }

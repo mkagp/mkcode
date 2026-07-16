@@ -84,11 +84,13 @@ describe("factory control plane", () => {
           source: "manual",
           workflowType: "feature",
           requestedBy: "operator",
+          validationCheckId: "lint",
         }),
       ).pipe(Effect.provideService(ProjectRegistry.ProjectRegistry, registry));
 
       NodeAssert.deepEqual(calls, ["read", "validate", "create"]);
       NodeAssert.equal(forwarded?.projectSnapshot.contentDigest, "fresh-digest");
+      NodeAssert.equal(forwarded?.validationCheckId, "lint");
       NodeAssert.equal(result._tag, "Failure");
       if (result._tag !== "Failure") {
         NodeAssert.fail("Expected workflow creation to fail.");
