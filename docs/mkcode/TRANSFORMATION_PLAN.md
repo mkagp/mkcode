@@ -20,9 +20,11 @@ without separate explicit direction.
   disabled inherited automation references, toolchain documentation, licensing
   note, and compatibility inventory are present. A remote `main` Actions run
   passed; branch protection remains owner-configured.
-- **Phase 4:** implemented in this change as a deliberately minimal,
+- **Phase 4:** implemented as a deliberately minimal,
   non-executing project configuration and server registration slice.
-- **Phases 2–3 and 5–13:** not started.
+- **Phase 5:** implemented as a separate simulation-only worker, SQLite engine,
+  loopback API, and server HTTP client.
+- **Phases 2–3 and 6–13:** not started.
 
 ## Phase 0: Land the audit documentation
 
@@ -120,7 +122,7 @@ without separate explicit direction.
   package consumers; preserve or archive `project-registrations.json` for
   operator recovery. Checked-in project configuration remains inert.
 
-## Phase 5: Add a minimal durable factory-worker skeleton
+## Phase 5: Add a minimal durable factory-worker skeleton — implemented
 
 - **Goal:** prove process and persistence ownership before executing agents.
 - **Prerequisites:** project/config schemas and internal API authentication design.
@@ -138,6 +140,11 @@ without separate explicit direction.
   external DB/queue, Herdr/Linear/GitHub.
 - **Rollback:** stop/disable the worker and remove the feature-gated server client;
   preserve its DB for diagnosis rather than destructive rollback.
+- **Implemented evidence:** `packages/workflow-engine/src/workflowEngine.test.ts`
+  exercises migrations, atomic creation, idempotency, leases/reclaim, retries,
+  approvals, cancellation, recovery, and replay. The real HTTP/restart flow is
+  covered by `apps/factory-worker/src/runtime.test.ts`; server ownership is
+  limited to `apps/server/src/factoryWorkerClient.ts`.
 
 ## Phase 6: Prove the first vertical workflow
 
@@ -292,11 +299,12 @@ without separate explicit direction.
 
 ## Ordering rule
 
-Before Phase 2, observe the new `MK Code CI / Validate supported baseline` check
-on both a pull request and `main`, then require it through repository branch
-protection. The next product-code task after that evidence is Phase 2 only:
-user-visible MK Code branding with no persisted/protocol identifier renames.
+Phase 5 proved the transaction, lease, restart, approval, cancellation, and
+event-replay boundary without execution. The next factory product-code task is
+Phase 6's single vertical slice only. It must introduce the smallest explicit
+ProcessHost, workspace ownership, one runtime bridge, and one deterministic lint
+command, then stop at human review.
 
-Do not combine Phase 2 with source deletion or factory implementation. The first
-factory architecture risk probe remains the Phase 5 transaction, lease, and
-crash-recovery skeleton—not a generalized team or workflow language.
+Phase 2 display branding and Phase 3 product-surface freezing remain independent
+tracks. Do not combine either with Phase 6, and do not generalize teams,
+registries, or a workflow language until the vertical slice supplies evidence.

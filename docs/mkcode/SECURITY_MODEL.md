@@ -140,6 +140,28 @@ The worker API requires:
 - audit records for every accepted mutation; and
 - no endpoint that accepts arbitrary process launch from browser input.
 
+## Implemented factory-worker boundary
+
+`apps/factory-worker/src/config.ts` binds to loopback by default and rejects a
+non-loopback host unless `MKCODE_FACTORY_ALLOW_NON_LOOPBACK=true` is deliberately
+set. Every route, including health, requires the separate
+`MKCODE_FACTORY_TOKEN`; `api.ts` compares SHA-256 credential digests with
+`timingSafeEqual` and emits only generic unauthorized responses. The client in
+`apps/server/src/factoryWorkerClient.ts` keeps the credential private and never
+serializes it for a browser.
+
+Factory state is independent of interactive server state. The worker enforces
+`0700` on its state directory and `0600` on the database and SQLite WAL/shared
+memory files. It opens state files with `O_NOFOLLOW` and checks path components
+for symlinks before creation/chmod. This has been verified on Linux; pathname
+races and Windows ACL semantics require a later deployment-hardening review.
+
+The API accepts only schema-validated workflow metadata, immutable resolved
+project snapshots, cancellation actors, approval decisions, and event queries.
+Simulation handlers cannot launch a child process, execute a command, access a
+provider, create a worktree, or mutate project registration. This boundary is a
+durability proof, not a sandbox or authorization model for future agent code.
+
 ## Integrations and Herdr
 
 - Herdr process attachment can expose raw repository content, prompts, secrets,

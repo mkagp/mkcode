@@ -8,6 +8,10 @@ the only public control plane. The factory worker exclusively owns separate
 factory persistence and exposes a narrow authenticated loopback API and resumable
 event feed.
 
+The Phase 5 persistence/API skeleton of this target is now implemented. Runtime
+adapters, ProcessHosts, deterministic commands, workspaces, registries,
+integrations, and browser workflow views remain target components.
+
 This approach reuses proven provider, event, Git, auth, and connection patterns
 without making interactive threads or a browser request process authoritative
 for long-running work.
@@ -104,12 +108,23 @@ jobs, leases, AgentRuns, CommandRuns, approvals, workspaces, artifacts,
 integration synchronization, and workflow event history. It claims recoverable
 jobs and reconciles state before accepting new work after restart.
 
+**Implemented now:** `apps/factory-worker` provides the separate process,
+loopback API, credential check, polling simulation loop, startup reconciliation,
+and graceful shutdown. It deliberately contains no process-launch or repository
+mutation facility.
+
 ### Durable workflow engine
 
 Implements a deterministic state machine over immutable run snapshots. A state
 transition and corresponding JobIntent/outbox record commit atomically. It
 validates retries, gates, delegation, and stage completion. It never consumes a
 provider's “done” signal as sufficient validation.
+
+**Implemented now:** `packages/workflow-engine` implements the fixed simulated
+stage sequence, transactional JobIntents, claims/leases, capped injectable
+retries, cancellation, durable human review, idempotent create/decision paths,
+cursor events, and recovery in separate SQLite. A generalized workflow
+definition language remains deferred.
 
 ### Registries
 
