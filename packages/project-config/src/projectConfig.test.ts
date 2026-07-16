@@ -179,6 +179,33 @@ describe("project configuration", () => {
     ),
   );
 
+  it.effect("preserves meaningful whitespace in project-relative paths", () =>
+    withNode(
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const contents = validConfiguration.replace(
+          "baseBranch: main",
+          'baseBranch: main\n  contextFiles: [" report.md", "report.md "]',
+        );
+        const repository = yield* makeRepository(contents);
+        yield* fs.writeFileString(path.join(repository.root, " report.md"), "leading");
+        yield* fs.writeFileString(path.join(repository.root, "report.md "), "trailing");
+
+        const resolved = yield* resolveProjectConfiguration({
+          repositoryRoot: repository.root,
+          sourcePath: repository.sourcePath,
+          contents,
+        });
+
+        assert.deepEqual(
+          resolved.repository.contextFiles.map((context) => context.path),
+          [" report.md", "report.md "],
+        );
+      }),
+    ),
+  );
+
   it.effect("exports a version 1-only project configuration schema", () =>
     withNode(
       Effect.gen(function* () {

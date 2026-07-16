@@ -1,9 +1,11 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
+import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import * as PlatformError from "effect/PlatformError";
+import * as TestClock from "effect/testing/TestClock";
 
 import * as ServerConfig from "./config.ts";
 import {
@@ -193,4 +195,41 @@ describe("server state permissions", () => {
       assert.equal(permissionBits((yield* fs.stat(targetFile)).mode), 0o644);
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
+
+  it.effect("rejects a FIFO state file without waiting for a writer", () =>
+    Effect.gen(function* () {
+      if (NodeProcess.platform !== "linux") return;
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "mkcode-state-fifo-" });
+      const fifoPath = path.join(root, "project-registrations.json");
+      NodeChildProcess.execFileSync("mkfifo", [fifoPath]);
+      const startedAt = yield* Clock.currentTimeMillis;
+      yield* Effect.sleep("300 millis").pipe(
+        Effect.andThen(
+          Effect.sync(() => {
+            try {
+              const descriptor = NodeFS.openSync(
+                fifoPath,
+                NodeFS.constants.O_WRONLY | NodeFS.constants.O_NONBLOCK,
+              );
+              NodeFS.closeSync(descriptor);
+            } catch {
+              // The nonblocking reader already rejected the FIFO.
+            }
+          }),
+        ),
+        Effect.forkScoped,
+      );
+
+      const error = yield* Effect.flip(ensurePrivateFile(fifoPath));
+
+      assert.instanceOf(error, PlatformError.PlatformError);
+      assert.isBelow((yield* Clock.currentTimeMillis) - startedAt, 250);
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer), TestClock.withLive),
+  );
 });
+// @effect-diagnostics nodeBuiltinImport:off
+import * as NodeChildProcess from "node:child_process";
+import * as NodeFS from "node:fs";
+import * as NodeProcess from "node:process";

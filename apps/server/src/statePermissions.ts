@@ -85,6 +85,7 @@ const openLinuxPathWithoutSymlinks = Effect.fn("StatePermissions.openLinuxPathWi
       const flags =
         NodeFS.constants.O_RDONLY |
         NodeFS.constants.O_NOFOLLOW |
+        (isFinalComponent && input.expectedType === "File" ? NodeFS.constants.O_NONBLOCK : 0) |
         (!isFinalComponent || input.expectedType === "Directory"
           ? NodeFS.constants.O_DIRECTORY
           : 0);

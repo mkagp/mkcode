@@ -412,7 +412,7 @@ export const resolveProjectConfiguration = (input: {
       allowRoot = false,
     ): { relative: string; absolute: string } | undefined => {
       const trimmed = relativePath.trim();
-      if (trimmed.length === 0 || path.isAbsolute(trimmed)) {
+      if (trimmed.length === 0 || path.isAbsolute(relativePath)) {
         issues.push({
           code: "unsafe_path",
           path: issuePath,
@@ -420,7 +420,7 @@ export const resolveProjectConfiguration = (input: {
         });
         return undefined;
       }
-      const absolute = path.resolve(repositoryRoot, trimmed);
+      const absolute = path.resolve(repositoryRoot, relativePath);
       if (!insideRoot(absolute) || (!allowRoot && absolute === repositoryRoot)) {
         issues.push({
           code: "unsafe_path",
