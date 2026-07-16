@@ -44,6 +44,19 @@ separately reviewed authentication and authorization model is implemented.
 - Runtime processes and deterministic commands receive only required secret
   references and environment values.
 
+The implemented deterministic runner (`packages/command-runner`) invokes the
+snapshotted executable and argument array directly with `shell:false`. Its base
+environment allowlist is `PATH`, `HOME`, `TMPDIR`, `TMP`, `TEMP`, `LANG`,
+`LC_ALL`, and `LC_CTYPE`; declared environment references add only their target
+names. `MKCODE_FACTORY_TOKEN` is neither inherited nor permitted as a declared
+source. Resolved values are held in memory for launch and redaction only.
+
+Working directories are relative to the snapshotted repository execution root,
+checked lexically and by realpath, and checked again immediately before spawn.
+This narrows but does not eliminate filesystem TOCTOU races. Commands run with
+the factory worker's OS authority and network access; process groups and
+worktrees are not sandboxes.
+
 ## Implemented project-configuration boundary
 
 Local registration accepts an absolute repository path only through an
@@ -161,9 +174,16 @@ a later deployment-hardening review.
 
 The API accepts only schema-validated workflow metadata, immutable resolved
 project snapshots, cancellation actors, approval decisions, and event queries.
-Simulation handlers cannot launch a child process, execute a command, access a
-provider, create a worktree, or mutate project registration. This boundary is a
-durability proof, not a sandbox or authorization model for future agent code.
+Planning/implementation simulation handlers cannot launch a child process,
+access a provider, create a worktree, or mutate project registration. The one
+validating handler can invoke only the selected project check stored in the run
+snapshot. Worker routes accept IDs, never executable/argument payloads.
+
+Child output flows through a chunk-aware exact-value and token-pattern redactor
+before restricted artifact writes. Each stream is capped at 1 MiB, continues
+draining after truncation, records observed/persisted counts and SHA-256, and is
+returned in authenticated pages capped at 64 KiB. This reduces accidental
+secret retention but is not complete data-loss prevention.
 
 ## Integrations and Herdr
 

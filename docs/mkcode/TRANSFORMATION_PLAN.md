@@ -24,7 +24,10 @@ without separate explicit direction.
   non-executing project configuration and server registration slice.
 - **Phase 5:** implemented as a separate simulation-only worker, SQLite engine,
   loopback API, and server HTTP client.
-- **Phases 2–3 and 6–13:** not started.
+- **Deterministic command foundation:** implemented as the first bounded part of
+  Phase 6: LocalProcessHost, CommandRun migration, declared-check resolution,
+  redacted output, timeout/cancellation, and human-review advancement.
+- **Phases 2–3, the worktree/agent remainder of Phase 6, and 7–13:** not started.
 
 ## Phase 0: Land the audit documentation
 
@@ -146,17 +149,19 @@ without separate explicit direction.
   covered by `apps/factory-worker/src/runtime.test.ts`; server ownership is
   limited to `apps/server/src/factoryWorkerClient.ts`.
 
-## Phase 6: Prove the first vertical workflow
+## Phase 6: Prove the first vertical workflow — command foundation implemented
 
 - **Goal:** exercise the smallest valuable durable path end to end.
-- **Prerequisites:** worker skeleton, one project config/profile, local
-  ProcessHost, one bridged existing AgentRuntime, worker-owned worktree manager,
-  deterministic command runner.
+- **Prerequisites:** worker skeleton and one project config/profile are complete.
+  LocalProcessHost and deterministic command execution are now complete;
+  worker-owned worktree allocation and one bridged AgentRuntime remain.
 - **Affected:** worker stage handlers, runtime/process ports, VCS/worktree bridge,
   minimal server API/view.
-- **Flow:** manual task → allocate worktree → launch one builder → run one
-  configured lint command → on failure send recorded output to the same builder
-  once → rerun lint → stop at durable human review.
+- **Target/future flow:** manual task → allocate worktree → launch one builder →
+  run one configured lint command → on failure send recorded output to the same
+  builder once → rerun lint → stop at durable human review. The currently
+  implemented subset is command-only and does not launch a builder or repair
+  failures.
 - **Deliverables:** restart-safe run with immutable snapshot, owned workspace,
   AgentRun, CommandRuns, artifacts, one capped repair, durable approval.
 - **Verification:** happy path; lint failure/repair; retry exhaustion; cancellation;
@@ -168,6 +173,13 @@ without separate explicit direction.
   build, Herdr, Linear, GitHub, merge.
 - **Rollback:** feature flag workflow creation; drain/cancel runs; preserve run
   database and worktree ownership markers for manual recovery.
+- **Implemented command subset:** a run may select one check ID. The validating
+  stage resolves it from the stored snapshot, records CommandRun/output/events,
+  treats exit zero as pass, fails terminally on a nonzero deterministic result,
+  and stops passing work at human review. No agent repair occurs yet.
+- **Next exact slice:** allocate and durably own one disposable Git worktree,
+  then run this same selected check inside that workspace. Do not add agents,
+  repair loops, generalized workflows, Herdr, or publication in that slice.
 
 ## Phase 7: Expand the workflow
 
