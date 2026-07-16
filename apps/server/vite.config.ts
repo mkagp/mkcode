@@ -5,6 +5,7 @@ import baseConfig from "../../vite.config.ts";
 import { loadRepoEnv } from "../../scripts/lib/public-config.ts";
 
 const bundledPackagePrefixes = [
+  "@mkcode/",
   "@pierre/diffs",
   "@t3tools/",
   "effect-acp",

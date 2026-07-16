@@ -94,6 +94,7 @@ import * as GitWorkflowService from "./git/GitWorkflowService.ts";
 import * as ReviewService from "./review/ReviewService.ts";
 import * as ProjectSetupScriptRunner from "./project/ProjectSetupScriptRunner.ts";
 import * as RepositoryIdentityResolver from "./project/RepositoryIdentityResolver.ts";
+import * as ProjectRegistry from "./projectRegistry.ts";
 import * as ServerEnvironment from "./environment/ServerEnvironment.ts";
 import * as EnvironmentAuth from "./auth/EnvironmentAuth.ts";
 import * as ProcessDiagnostics from "./diagnostics/ProcessDiagnostics.ts";
@@ -277,6 +278,12 @@ function isThreadDetailEvent(event: OrchestrationEvent): event is Extract<
 const PROVIDER_STATUS_DEBOUNCE_MS = 200;
 
 const RPC_REQUIRED_SCOPE = new Map<string, AuthEnvironmentScope>([
+  [WS_METHODS.projectRegistryRegister, AuthOrchestrationOperateScope],
+  [WS_METHODS.projectRegistryList, AuthOrchestrationReadScope],
+  [WS_METHODS.projectRegistryRead, AuthOrchestrationReadScope],
+  [WS_METHODS.projectRegistryValidate, AuthOrchestrationOperateScope],
+  [WS_METHODS.projectRegistryDisable, AuthOrchestrationOperateScope],
+  [WS_METHODS.projectRegistryEnable, AuthOrchestrationOperateScope],
   [ORCHESTRATION_WS_METHODS.dispatchCommand, AuthOrchestrationOperateScope],
   [ORCHESTRATION_WS_METHODS.getTurnDiff, AuthOrchestrationReadScope],
   [ORCHESTRATION_WS_METHODS.getFullThreadDiff, AuthOrchestrationReadScope],
@@ -418,6 +425,7 @@ const makeWsRpcLayer = (
       const projectSetupScriptRunner = yield* ProjectSetupScriptRunner.ProjectSetupScriptRunner;
       const repositoryIdentityResolver =
         yield* RepositoryIdentityResolver.RepositoryIdentityResolver;
+      const projectRegistry = yield* ProjectRegistry.ProjectRegistry;
       const serverEnvironment = yield* ServerEnvironment.ServerEnvironment;
       const serverAuth = yield* EnvironmentAuth.EnvironmentAuth;
       const sourceControlDiscovery = yield* SourceControlDiscovery.SourceControlDiscovery;
@@ -1242,6 +1250,40 @@ const makeWsRpcLayer = (
           observeRpcEffect(WS_METHODS.serverGetConfig, loadServerConfig, {
             "rpc.aggregate": "server",
           }),
+        [WS_METHODS.projectRegistryRegister]: (input) =>
+          observeRpcEffect(WS_METHODS.projectRegistryRegister, projectRegistry.register(input), {
+            "rpc.aggregate": "project-registry",
+          }),
+        [WS_METHODS.projectRegistryList]: (_input) =>
+          observeRpcEffect(
+            WS_METHODS.projectRegistryList,
+            projectRegistry.list.pipe(Effect.map((projects) => ({ projects }))),
+            { "rpc.aggregate": "project-registry" },
+          ),
+        [WS_METHODS.projectRegistryRead]: (input) =>
+          observeRpcEffect(WS_METHODS.projectRegistryRead, projectRegistry.read(input.projectId), {
+            "rpc.aggregate": "project-registry",
+          }),
+        [WS_METHODS.projectRegistryValidate]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.projectRegistryValidate,
+            projectRegistry.validate(input.projectId),
+            { "rpc.aggregate": "project-registry" },
+          ),
+        [WS_METHODS.projectRegistryDisable]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.projectRegistryDisable,
+            projectRegistry.disable(input.projectId),
+            { "rpc.aggregate": "project-registry" },
+          ),
+        [WS_METHODS.projectRegistryEnable]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.projectRegistryEnable,
+            projectRegistry.enable(input.projectId),
+            {
+              "rpc.aggregate": "project-registry",
+            },
+          ),
         [WS_METHODS.serverRefreshProviders]: (input) =>
           observeRpcEffect(
             WS_METHODS.serverRefreshProviders,

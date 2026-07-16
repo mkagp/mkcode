@@ -121,6 +121,13 @@ run. Browser CRUD is deferred until the schemas stabilize.
 The project registry maps stable ProjectDefinition identities to approved local
 repository directories and checked-in `.mkcode/project.yaml` configuration.
 
+The first control-plane slice now exists as `packages/project-config`,
+`packages/contracts/src/projectRegistry.ts`, and
+`apps/server/src/projectRegistry.ts`. Its isolated atomic JSON registration
+file is a deliberate single-server stepping stone, not factory persistence. The
+future worker receives immutable resolved project snapshots through a typed
+boundary; it must not open or repurpose the registration file as workflow truth.
+
 ### Runtime adapters
 
 The target AgentRuntime package extracts the narrow execution/session/event

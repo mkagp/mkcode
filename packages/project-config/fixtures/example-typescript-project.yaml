@@ -1,0 +1,47 @@
+version: 1
+project:
+  id: example-typescript-project
+  name: Example TypeScript Project
+repository:
+  baseBranch: main
+setup:
+  - id: install
+    executable: pnpm
+    args:
+      - install
+      - --frozen-lockfile
+    workingDirectory: .
+    timeoutSeconds: 900
+checks:
+  - id: lint
+    executable: pnpm
+    args:
+      - exec
+      - biome
+      - check
+      - .
+    workingDirectory: .
+    timeoutSeconds: 300
+  - id: typecheck
+    executable: pnpm
+    args:
+      - exec
+      - tsc
+      - --noEmit
+    workingDirectory: .
+    timeoutSeconds: 300
+  - id: test
+    executable: pnpm
+    args:
+      - exec
+      - vitest
+      - run
+    workingDirectory: .
+    timeoutSeconds: 900
+workflows:
+  allowed:
+    - feature
+    - bug
+    - chore
+execution:
+  defaultProfile: coding-workhorse

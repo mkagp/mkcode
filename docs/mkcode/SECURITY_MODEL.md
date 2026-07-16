@@ -44,6 +44,28 @@ separately reviewed authentication and authorization model is implemented.
 - Runtime processes and deterministic commands receive only required secret
   references and environment values.
 
+## Implemented project-configuration boundary
+
+Local registration accepts an absolute repository path only through an
+authenticated operate-scoped server RPC. The server canonicalizes it, verifies
+an existing directory and Git marker, and reads only the fixed
+`.mkcode/project.yaml` location. Checked-in configuration cannot nominate an
+absolute repository root.
+
+The parser rejects unknown keys, scalar command strings, empty executables,
+invalid timeouts, traversal/absolute working and context paths, and symlink
+escapes for existing paths. Environment entries are variable-name references;
+the parser never reads the corresponding process environment. Registration
+stores no resolved secret values and performs no command, Git, worktree, or
+repository write operation.
+
+Artifact and worktree paths may not exist at validation time and therefore have
+lexical containment only. A future command/workspace implementation must repeat
+canonical parent/final-path checks at the moment of creation or use. Structured
+commands can still explicitly name a shell or dangerous executable, so the
+future runner must enforce executable, argument, network, credential, output,
+and cancellation policy. The parser is not a security sandbox.
+
 ## Secrets and redaction
 
 - Store secret values outside version-controlled project and registry files.

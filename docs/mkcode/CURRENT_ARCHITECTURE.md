@@ -1,8 +1,9 @@
 # Current architecture
 
-This document describes the verified repository at `main` commit
-`ecb35f75839925dd1ac6f854efeef5c9e291d11b`. Planned factory components are
-documented separately and do not exist in this baseline.
+This document describes the verified T3-derived architecture plus landed MK Code
+fork-safety and project-registration additions. The fixed derivation baseline is
+`ecb35f75839925dd1ac6f854efeef5c9e291d11b`; current code has advanced beyond
+that commit. Planned factory components are documented separately.
 
 ## System overview
 
@@ -58,6 +59,11 @@ apps/web and apps/mobile
 the protocol libraries. `apps/desktop` consumes client runtime, contracts,
 shared, SSH, and Tailscale. `infra/relay` consumes client runtime, contracts, and
 shared. `apps/marketing` is standalone.
+
+`packages/project-config` is a new independent MK Code boundary. Contracts
+depend on its schema-only export for browser-safe project registration records;
+the server depends on its full parser/resolver. It does not depend on providers,
+the interactive aggregate, UI packages, or process execution.
 
 ## Applications
 
@@ -128,6 +134,10 @@ requires a staged separation from generic local auth and connection behavior.
   and orchestration contracts. It is intentionally schema-only. The current
   orchestration aggregate is project/thread oriented
   (`packages/contracts/src/orchestration.ts`, notably lines 344, 601, and 805).
+- `packages/project-config`: version 1 `.mkcode/project.yaml` schemas, strict YAML
+  parsing, defaults, path/symlink containment, safe command descriptions,
+  structured errors, and deterministic resolved snapshots
+  (`packages/project-config/src/schema.ts` and `projectConfig.ts`).
 - `packages/shared`: runtime utilities shared by server and clients. It uses
   explicit subpath exports rather than a barrel. It includes project-script,
   Git, QR, platform, and general utilities.
@@ -149,6 +159,25 @@ The browser creates a connection environment and establishes WebSocket RPC
 through client runtime. The server authenticates the upgrade and handles RPC in
 `apps/server/src/ws.ts`, whose `/ws` assembly ends near `ws.ts:1862` and directly
 acquires many server services.
+
+### MK Code project registration flow
+
+`apps/server/src/ws.ts` exposes authenticated `projectRegistry.register`,
+`list`, `read`, `validate`, `disable`, and `enable` methods defined in
+`packages/contracts/src/projectRegistry.ts` and `rpc.ts`. Operate scope protects
+mutations; read scope protects inspection. `apps/server/src/projectRegistry.ts`
+canonicalizes the trusted absolute repository path, verifies a Git marker,
+loads `.mkcode/project.yaml` through `@mkcode/project-config`, and atomically
+replaces the versioned server-state file at
+`ServerConfig.projectRegistrationsPath`.
+
+The registration file is separate from interactive SQLite and settings. It
+contains machine-local mappings and the last validated resolved snapshot, never
+workflow runs or secret values. Registration and validation only read a target
+repository; they do not create `.git`, write configuration, execute a described
+command, or create a worktree. No browser project-management UI consumes these
+methods yet; the current proof is the WebSocket integration test in
+`apps/server/src/server.test.ts`.
 
 ```mermaid
 sequenceDiagram
@@ -310,8 +339,8 @@ pins Node 24.16.0, activates the root `packageManager` pnpm version, installs wi
 the frozen lockfile, and runs check, typecheck, Electron setup, all package tests,
 the production build, and release smoke through repository-local tooling. It has
 read-only contents permission and no production credentials or publishing steps.
-The fork still needs an observed Actions run and branch-protection configuration
-before remote enforcement is verified.
+An observed `main` Actions run passed; branch-protection configuration remains
+an owner-side repository setting rather than a repository file.
 
 Inherited release, relay, EAS, and community-mutating workflows are retained
 unchanged except for a disabled-reference header under
@@ -362,6 +391,9 @@ review item, not a finding of noncompliance.
 10. Documentation has drift: for example, existing provider documentation
     understates the five current drivers, and script documentation still refers
     to older Bun/Turbo behavior and an obsolete port.
+11. The JSON project-registration store is intentionally single-server and
+    atomic but is not a multi-writer store; factory run state must not be added
+    to it.
 
 ## Unverified areas
 

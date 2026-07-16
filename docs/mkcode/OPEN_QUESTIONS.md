@@ -1,7 +1,8 @@
 # Open questions
 
-Defaults below allow documentation and the next fork-safety phase to proceed.
-“Blocks next phase” refers specifically to Phase 1 of the transformation plan.
+Defaults below allow the implemented configuration phase to stand without
+guessing at later factory behavior. “Blocks next phase” now refers to Phase 5,
+the minimal durable factory-worker skeleton.
 
 ## Product
 
@@ -52,15 +53,28 @@ Defaults below allow documentation and the next fork-safety phase to proceed.
 
 ## Architecture
 
-### Should registry files live in this repository or an operator data directory?
+### Where should future reusable agent, team, workflow, and profile definitions live?
 
-- **Why it matters:** affects review/versioning, deployment updates, and local
+- **Why it matters:** project registration storage is now decided, but reusable
+  definition ownership affects review/versioning, deployment updates, and local
   customization.
-- **Recommended default:** ship repository-controlled defaults and allow a
+- **Recommended default:** ship repository-controlled defaults and later allow a
   version-controlled operator registry directory with explicit precedence.
-- **Cost of delay:** initial examples may move; snapshot semantics remain the
-  same.
+- **Cost of delay:** opaque project references cannot be resolved, but the worker
+  skeleton can store them without launching agents.
 - **Blocks next phase:** No.
+
+### Should worktree roots outside a registered repository be allowed?
+
+- **Why it matters:** version 1 configuration deliberately constrains the
+  project-supplied worktree root inside the repository; operators may prefer a
+  central high-capacity filesystem.
+- **Recommended default:** keep checked-in paths contained. Add any external
+  root as trusted machine-local registration policy with canonical allowlisted
+  roots and explicit ownership markers.
+- **Cost of delay:** early workflow worktrees must use the contained default or
+  a server-owned path chosen outside project configuration.
+- **Blocks next phase:** No; it must be decided before Phase 6 creates worktrees.
 
 ## Persistence
 
