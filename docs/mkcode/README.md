@@ -3,8 +3,9 @@
 MK Code is a hard fork of T3 Code that is becoming an independently maintained,
 browser-based control plane for interactive coding sessions and durable agentic
 development workflows. The current repository is a working T3-derived product;
-the factory architecture described here is a target, not an assertion that those
-components already exist.
+its Phase 5 simulation worker, workflow engine, and factory database are
+operational. The broader registry, execution, and integration architecture
+described here remains a target.
 
 ## Current status
 
@@ -12,9 +13,10 @@ The fixed upstream-derived starting baseline is
 `ecb35f75839925dd1ac6f854efeef5c9e291d11b`. The existing browser, server,
 provider adapters, interactive orchestration, SQLite persistence, Git/worktree
 support, local authentication, and Tailscale support are operational. The
-factory worker, workflow engine, factory database, agent/team/workflow/profile
-registries, and Herdr, Linear, and workflow-oriented GitHub adapters are planned
-components.
+simulation-only factory worker, workflow engine, and factory database are now
+operational. Agent/team/workflow/profile registries, command and worktree
+execution, and Herdr, Linear, and workflow-oriented GitHub adapters remain
+planned components.
 
 Phase 1 fork-safety controls are implemented: one validation-only active
 CI workflow, telemetry disabled by default, inherited publishing/deployment/
@@ -23,10 +25,17 @@ explicit toolchain, licensing, and persisted-identifier guidance. A remote
 Actions run has passed on `main`; branch-protection enforcement remains an
 owner-side repository setting.
 
-Minimal project configuration and local project registration are now
-implemented. The server can validate a checked-in `.mkcode/project.yaml`, store
-an isolated local registration, and expose browser-safe `projectRegistry.*`
-contracts. It cannot execute those commands or start a workflow.
+Minimal project configuration and local project registration are implemented.
+The server can validate a checked-in `.mkcode/project.yaml`, store an isolated
+local registration, and expose browser-safe `projectRegistry.*` contracts.
+
+The durable factory-worker skeleton is now implemented in
+`apps/factory-worker`, `packages/factory-contracts`, and
+`packages/workflow-engine`. It owns a separate factory SQLite database,
+transactional stage/job/event state, leases, retries, cancellation, durable
+human approval, recovery, and an authenticated loopback API. Its handlers are
+simulation-only: no project command, worktree, Git operation, agent, provider,
+or external integration is launched.
 
 MK Code does not seek full T3 Code feature parity. Desktop, mobile, marketing,
 T3 Connect, relay infrastructure, and public T3 distribution remain present
@@ -58,6 +67,9 @@ Architecture decisions:
 - [0004: Provider-neutral agent definitions](DECISIONS/0004-provider-neutral-agent-definitions.md)
 - [0005: Herdr as a process host](DECISIONS/0005-herdr-as-process-host.md)
 - [0006: Server-owned project registration store](DECISIONS/0006-project-registration-store.md)
+- [0007: Factory persistence ownership](DECISIONS/0007-factory-persistence-ownership.md)
+- [0008: Transactional job intents](DECISIONS/0008-transactional-job-intents.md)
+- [0009: Worker loopback API authentication](DECISIONS/0009-worker-loopback-api-authentication.md)
 
 ## Terminology
 

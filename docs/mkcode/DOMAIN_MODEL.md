@@ -1,9 +1,10 @@
 # Factory domain model
 
-This document defines the target factory domain. The current server now has a
-minimal local project registration and resolved configuration snapshot, but the
-factory `ProjectDefinition` record and every run/work item entity below remain
-planned unless explicitly stated otherwise.
+This document defines the factory domain. Phase 5 implements the minimal
+WorkItem, WorkflowRun, StageRun, Attempt, JobIntent/Lease, IdempotencyRecord,
+Approval, Artifact metadata table, and WorkflowEvent subset needed by the fixed
+simulation. ProjectDefinition, definitions, agent/command/workspace runs, and
+external links remain planned unless explicitly stated otherwise.
 
 ## Domain boundary
 
@@ -89,6 +90,8 @@ erDiagram
 - **Mutable:** summary, prioritization, current disposition, links.
 - **Prohibited:** deriving completion directly from a conversation, Linear issue,
   or pull request.
+- **Implemented subset:** provider-neutral manual/conversation/integration source
+  and optional opaque external-reference metadata in factory SQLite.
 
 ### WorkflowDefinition
 
@@ -105,10 +108,15 @@ erDiagram
 - **Purpose:** one durable execution of a WorkItem.
 - **Identity:** stable run ID.
 - **Lifecycle:** queued, running, awaiting-approval, succeeded, failed, cancelled.
-- **Snapshot:** project configuration, workflow, team, agents, profiles, input
-  specifications, and source revision.
+- **Implemented snapshot:** immutable resolved project configuration and its
+  digest.
+- **Target/deferred snapshots:** workflow, team, agents, execution profiles,
+  input specifications, and source revision.
 - **Source of truth:** factory persistence exclusively.
 - **Prohibited:** silent mutation from later definition changes.
+- **Implemented subset:** an immutable resolved project snapshot and digest,
+  fixed simulated workflow type, cancellation/terminal state, and optimistic
+  version. Team/agent/profile/workflow-definition snapshots are deferred.
 
 ### StageRun
 
@@ -118,6 +126,9 @@ erDiagram
   skipped, cancelled.
 - **Relationships:** attempts, job intents, approvals, artifacts.
 - **Prohibited:** changing status based only on runtime output.
+- **Implemented subset:** planning, implementing, validating, and human-review
+  materializations with sequence, attempt count, timestamps, outcome, failure
+  classification, and optimistic version.
 
 ### Attempt
 
@@ -126,6 +137,9 @@ erDiagram
 - **Lifecycle:** queued, claimed, running, succeeded, failed, cancelled, expired.
 - **Mutable:** timestamps, failure classification, lease association.
 - **Prohibited:** exceeding the snapshotted retry policy.
+- **Implemented subset:** one row per claim/reclaim with retry ancestry and
+  expired/failed/cancelled outcomes; persisted `completed` is the lifecycle
+  `succeeded` outcome.
 
 ### AgentDefinition
 
@@ -182,6 +196,8 @@ erDiagram
 - **Identity:** approval ID and idempotency key.
 - **Lifecycle:** pending, approved, rejected, expired, cancelled.
 - **Prohibited:** existing only as an in-memory provider callback.
+- **Implemented subset:** durable human-review pending/approved/rejected/
+  cancelled decisions. Approval resolution is authenticated at the worker API.
 
 ### Artifact
 
@@ -189,6 +205,8 @@ erDiagram
   patches, logs, command output, reports, diffs, and build products.
 - **Identity:** artifact ID plus checksum where available.
 - **Prohibited:** silently overwriting evidence from an earlier attempt.
+- **Implemented subset:** metadata table and read contract only; simulation
+  creates no artifacts and SQLite never stores large contents.
 
 ### ExternalIssueLink and PullRequestLink
 
@@ -206,6 +224,9 @@ erDiagram
 - **Invariant:** the workflow transition and its JobIntent are committed in one
   transaction.
 - **Prohibited:** ephemeral-only queueing.
+- **Implemented subset:** fixed simulation job types, versioned JSON payload,
+  availability, claim count, lease fields, completion metadata, and terminal
+  failure. A unique stage/job idempotency key prevents duplicate intents.
 
 ### Lease
 
@@ -213,6 +234,8 @@ erDiagram
 - **Identity:** job ID, worker ID, claim token.
 - **Mutable:** claimed-at, heartbeat, expires-at.
 - **Invariant:** stale leases are reclaimable; completion validates the token.
+- **Implemented subset:** owner plus expiration on JobIntent; only the owner may
+  renew or complete, and expired claims create a later Attempt after recovery.
 
 ### IdempotencyRecord
 
@@ -220,6 +243,9 @@ erDiagram
 - **Identity:** scoped idempotency key.
 - **Invariant:** duplicate delivery returns or reconciles the prior outcome
   instead of repeating irreversible effects.
+- **Implemented subset:** workflow-create scope stores canonical request digest
+  and run reference. Same input replays the result; conflicting input returns a
+  deterministic conflict.
 
 ## Durability invariants
 

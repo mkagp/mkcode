@@ -1,8 +1,8 @@
 # Open questions
 
-Defaults below allow the implemented configuration phase to stand without
-guessing at later factory behavior. “Blocks next phase” now refers to Phase 5,
-the minimal durable factory-worker skeleton.
+Defaults below allow the implemented configuration and factory-worker skeleton
+to stand without guessing at execution behavior. “Blocks next phase” now refers
+to Phase 6, the first command/agent/worktree vertical workflow.
 
 ## Product
 
@@ -95,8 +95,12 @@ the minimal durable factory-worker skeleton.
 - **Recommended default:** append durable domain events and transactional current
   state/outbox records; use full aggregate replay only where it pays for recovery
   or audit.
-- **Cost of delay:** Phase 5 schema design cannot finish without choosing.
-- **Blocks next phase:** No; blocks Phase 5.
+- **Implemented decision:** Phase 5 uses transactional current-state tables plus
+  an append-only cursor event history; it does not reconstruct every table solely
+  from events.
+- **Cost of delay:** none for Phase 6; revisit only if aggregate replay provides
+  a concrete recovery or audit benefit.
+- **Blocks next phase:** No.
 
 ## Runtime adapters
 
@@ -220,7 +224,9 @@ the minimal durable factory-worker skeleton.
 - **Recommended default:** separate service-owned directories under a documented
   MK Code home; backups outside the active data directory; worktrees on the same
   filesystem as their Git repository unless proven otherwise.
-- **Cost of delay:** Phase 5 storage paths remain provisional.
+- **Cost of delay:** the implemented local factory default is usable, but
+  unattended deployment paths, backup locations, and capacity policy remain
+  provisional.
 - **Blocks next phase:** No.
 
 ## Licensing

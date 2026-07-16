@@ -1,7 +1,7 @@
 # Current architecture
 
 This document describes the verified T3-derived architecture plus landed MK Code
-fork-safety and project-registration additions. The fixed derivation baseline is
+fork-safety, project-registration, and factory-worker skeleton additions. The fixed derivation baseline is
 `ecb35f75839925dd1ac6f854efeef5c9e291d11b`; current code has advanced beyond
 that commit. Planned factory components are documented separately.
 
@@ -29,6 +29,9 @@ flowchart LR
     Server --> Git[Git/worktrees/checkpoints]
     Server --> PTY[Terminals and previews]
     Server --> Tailscale[Tailscale Serve]
+    Server -->|authenticated loopback HTTP| Worker[apps/factory-worker]
+    Worker --> Engine[packages/workflow-engine]
+    Engine --> FactorySQLite[(Separate factory.sqlite)]
     Web & Mobile & Desktop --> Relay[T3 Connect / infra/relay]
     Relay --> Cloud[Clerk, Cloudflare, PlanetScale, Axiom, APNs]
     Marketing[apps/marketing] -. public product site .-> Web
@@ -65,6 +68,14 @@ depend on its schema-only export for browser-safe project registration records;
 the server depends on its full parser/resolver. It does not depend on providers,
 the interactive aggregate, UI packages, or process execution.
 
+`packages/factory-contracts` is the schema-only factory wire/domain boundary.
+`packages/workflow-engine` owns the synchronous `node:sqlite` state machine and
+depends only on factory contracts and the resolved project snapshot schema.
+`apps/factory-worker` depends on those packages and owns process configuration,
+job polling, simulation handlers, and its HTTP listener. The server depends on
+factory contracts only and contains an HTTP client; it has no workflow-engine or
+factory-worker dependency.
+
 ## Applications
 
 ### `apps/server`
@@ -80,6 +91,33 @@ The server build depends on the web build and bundles/serves its static output
 (`apps/server/vite.config.ts:23-32`, `apps/server/src/config.ts:190-208`, and
 `apps/server/src/http.ts:207-267`). This coupling makes the current server both an
 API host and the browser application distribution unit.
+
+The additive `apps/server/src/factoryWorkerClient.ts` is an HTTP client for the
+worker's authenticated API. It holds the service credential in a private field,
+validates worker responses, and offers create/list/read/cancel/approve/event
+operations. It is not yet exposed through browser RPC or used by interactive
+thread orchestration. `factoryControlPlane.ts` supplies the narrow composition
+that reads a currently valid/enabled registration and sends its immutable
+resolved snapshot to workflow creation; it never passes the registration store
+path or asks the worker to reread it.
+
+### `apps/factory-worker`
+
+`apps/factory-worker/src/bin.ts` is an independently runnable entry point.
+`config.ts` defaults to `127.0.0.1`, rejects an unsafe bind without an explicit
+override, requires `MKCODE_FACTORY_TOKEN`, and derives `factory.sqlite` from its
+own state directory. `runtime.ts` opens and reconciles the engine before
+listening, polls durable jobs, and drains current simulated work during graceful
+shutdown up to a configured grace deadline. Simulation handlers receive an
+abort signal and must settle before a lease-safe deadline; the worker never
+allows an unbounded handler wait to hold the HTTP listener and database open.
+`MKCODE_FACTORY_SHUTDOWN_GRACE_MS` may override the default five-second shutdown
+grace period.
+
+`api.ts` authenticates all routes with a constant-time comparison of a separate
+server-to-worker bearer credential. It exposes health, workflow create/list/read/
+cancel, approval resolution, and cursor event retrieval. The API never accepts
+an executable or mutable project-registration path.
 
 ### `apps/web`
 
@@ -138,6 +176,15 @@ requires a staged separation from generic local auth and connection behavior.
   parsing, defaults, path/symlink containment, safe command descriptions,
   structured errors, and deterministic resolved snapshots
   (`packages/project-config/src/schema.ts` and `projectConfig.ts`).
+- `packages/factory-contracts`: provider-neutral WorkItem, WorkflowRun,
+  StageRun, Attempt, JobIntent/Lease, IdempotencyRecord, Approval, Artifact,
+  WorkflowEvent, API request/result, and error schemas. It has no persistence,
+  HTTP server, or UI code.
+- `packages/workflow-engine`: exclusive factory SQLite migrations and current
+  state, atomic transitions/outbox intents, lease claims, retries, idempotency,
+  cancellation, approvals, cursor events, and reconciliation
+  (`src/workflowEngine.ts`). It imports no server, browser, provider, Git, or
+  command-launch implementation.
 - `packages/shared`: runtime utilities shared by server and clients. It uses
   explicit subpath exports rather than a barrel. It includes project-script,
   Git, QR, platform, and general utilities.
@@ -287,6 +334,31 @@ is an unbounded in-memory queue whose drain behavior supports synchronization,
 not durable claims. `RuntimeReceiptBus` is explicitly short-lived PubSub. A
 process crash after event commit but before reactor execution can therefore lose
 an intended side effect.
+
+## Factory orchestration and persistence
+
+Factory persistence is physically separate at
+`<factory-state>/factory.sqlite`. Migration 1 creates `work_items`,
+`workflow_runs`, `stage_runs`, `attempts`, `job_intents`,
+`idempotency_records`, `approvals`, `artifacts`, and `workflow_events`.
+`PRAGMA user_version` rejects databases newer than the worker. Startup is
+idempotent, enables foreign keys and WAL, narrows the state directory to `0700`
+and database/WAL/shared-memory files to `0600`, and rejects symlink state paths.
+
+Workflow creation commits the WorkItem, queued WorkflowRun, planning StageRun,
+pending JobIntent, initial events, and idempotency receipt in one immediate
+transaction. Claims select and update under the same transaction, materialize an
+Attempt, and assign an expiring owner lease. Completion validates lease
+ownership and stage version, commits the next stage/job/events atomically, and
+stops at a durable human-review Approval. Approval or rejection is terminal and
+idempotent; cancellation atomically prevents further scheduling.
+
+Startup reconciliation requeues expired leases, cancels jobs for cancelled
+runs, repairs queued stages missing jobs and review stages missing approvals,
+and marks ambiguous completed-job/uncommitted-transition state as
+`operator_attention` rather than fabricating success. Events use a SQLite
+autoincrement cursor and replay after restart. Current simulation handlers only
+call engine transitions; they do not execute project configuration.
 
 ## Git, worktrees, checkpoints, terminals, and previews
 
