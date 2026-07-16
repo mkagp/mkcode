@@ -108,7 +108,11 @@ path or asks the worker to reread it.
 override, requires `MKCODE_FACTORY_TOKEN`, and derives `factory.sqlite` from its
 own state directory. `runtime.ts` opens and reconciles the engine before
 listening, polls durable jobs, and drains current simulated work during graceful
-shutdown.
+shutdown up to a configured grace deadline. Simulation handlers receive an
+abort signal and must settle before a lease-safe deadline; the worker never
+allows an unbounded handler wait to hold the HTTP listener and database open.
+`MKCODE_FACTORY_SHUTDOWN_GRACE_MS` may override the default five-second shutdown
+grace period.
 
 `api.ts` authenticates all routes with a constant-time comparison of a separate
 server-to-worker bearer credential. It exposes health, workflow create/list/read/

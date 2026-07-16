@@ -13,7 +13,13 @@ const sortValue = (value: unknown): unknown => {
   return value;
 };
 
-export const canonicalJson = (value: unknown): string => JSON.stringify(sortValue(value));
+export const canonicalJson = (value: unknown): string => {
+  const encoded = JSON.stringify(sortValue(value));
+  if (encoded === undefined) {
+    throw new TypeError("Canonical JSON requires a JSON-representable root value.");
+  }
+  return encoded;
+};
 
 export const digestJson = (value: unknown): string =>
   NodeCrypto.createHash("sha256").update(canonicalJson(value)).digest("hex");

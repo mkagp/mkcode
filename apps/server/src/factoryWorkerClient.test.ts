@@ -82,6 +82,29 @@ describe("FactoryWorkerClient", () => {
     }
   });
 
+  it("rejects malformed worker error bodies instead of trusting arbitrary codes", async () => {
+    const server = NodeHttp.createServer((_request, response) => {
+      response.writeHead(418, { "content-type": "application/json" });
+      response.end(JSON.stringify({ code: "invented_code", message: "Untrusted response." }));
+    });
+    const port = await listen(server);
+    try {
+      const client = new FactoryWorkerClient({
+        origin: `http://127.0.0.1:${port}`,
+        credential: "server-to-worker-error-schema-credential",
+      });
+      await NodeAssert.rejects(
+        () => client.listWorkflows(),
+        (cause: unknown) =>
+          cause instanceof FactoryWorkerClientError &&
+          cause.code === "internal_error" &&
+          cause.message === "Factory worker request failed.",
+      );
+    } finally {
+      await close(server);
+    }
+  });
+
   it("aborts stalled worker requests at the configured deadline", async () => {
     const stalledFetch = (_input: unknown, init?: RequestInit) =>
       new Promise<Response>((_resolve, reject) => {
@@ -109,6 +132,15 @@ describe("FactoryWorkerClient", () => {
           origin: "http://127.0.0.1:4317",
           credential: "server-to-worker-timeout-credential",
           timeoutMilliseconds: 0,
+        }),
+      TypeError,
+    );
+    NodeAssert.throws(
+      () =>
+        new FactoryWorkerClient({
+          origin: "http://127.0.0.1:4317",
+          credential: "server-to-worker-timeout-credential",
+          timeoutMilliseconds: 2_147_483_648,
         }),
       TypeError,
     );

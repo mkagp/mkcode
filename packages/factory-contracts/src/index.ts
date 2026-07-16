@@ -8,6 +8,7 @@ export const WorkflowListMaximumPageSize = 100;
 
 const NonNegativeInt = Schema.Int.check(Schema.isGreaterThanOrEqualTo(0));
 const PositiveInt = Schema.Int.check(Schema.isGreaterThanOrEqualTo(1));
+const TrimmedNonEmptyString = Schema.Trimmed.check(Schema.isMinLength(1));
 
 export const WorkItemSource = Schema.Literals(["manual", "conversation", "integration"]);
 export type WorkItemSource = typeof WorkItemSource.Type;
@@ -207,17 +208,17 @@ export const WorkflowEvent = Schema.Struct({
 export type WorkflowEvent = typeof WorkflowEvent.Type;
 
 export const WorkflowCreateRequest = Schema.Struct({
-  idempotencyKey: Schema.String,
+  idempotencyKey: TrimmedNonEmptyString,
   workItem: Schema.Struct({
     id: Schema.optional(Schema.String),
-    projectId: Schema.String,
+    projectId: TrimmedNonEmptyString,
     title: Schema.String,
     description: Schema.String,
     source: WorkItemSource,
     externalReference: Schema.optional(Schema.Record(Schema.String, Schema.String)),
   }),
   workflowType: Schema.String,
-  requestedBy: Schema.String,
+  requestedBy: TrimmedNonEmptyString,
   projectSnapshot: ResolvedProjectConfiguration,
 });
 export type WorkflowCreateRequest = typeof WorkflowCreateRequest.Type;
@@ -244,7 +245,7 @@ export type WorkflowDetail = typeof WorkflowDetail.Type;
 
 export const WorkflowListResult = Schema.Struct({
   runs: Schema.Array(WorkflowRun),
-  nextCursor: NonNegativeInt,
+  nextCursor: Schema.optional(Schema.String.check(Schema.isMinLength(1))),
   hasMore: Schema.Boolean,
 });
 export type WorkflowListResult = typeof WorkflowListResult.Type;

@@ -2,9 +2,10 @@
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
-import { WorkflowEngineError } from "@mkcode/workflow-engine";
+import { MAX_LEASE_MILLISECONDS, WorkflowEngineError } from "@mkcode/workflow-engine";
 
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "::1", "localhost"]);
+const MAX_TIMER_MILLISECONDS = 2_147_483_647;
 
 export interface FactoryWorkerConfig {
   readonly host: string;
@@ -15,6 +16,7 @@ export interface FactoryWorkerConfig {
   readonly workerInstanceId: string;
   readonly pollIntervalMilliseconds: number;
   readonly leaseMilliseconds: number;
+  readonly shutdownGraceMilliseconds: number;
 }
 
 export interface FactoryWorkerConfigInput {
@@ -26,6 +28,7 @@ export interface FactoryWorkerConfigInput {
   readonly workerInstanceId?: string;
   readonly pollIntervalMilliseconds?: number;
   readonly leaseMilliseconds?: number;
+  readonly shutdownGraceMilliseconds?: number;
   readonly allowNonLoopback?: boolean;
 }
 
@@ -36,6 +39,17 @@ const requirePositiveSafeInteger = (value: number, name: string): number => {
   return value;
 };
 
+const parseEnvironmentInteger = (value: string, name: string): number => {
+  if (!/^(?:0|[1-9][0-9]*)$/u.test(value)) {
+    throw new WorkflowEngineError("invalid_request", `${name} must be a decimal integer.`);
+  }
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed)) {
+    throw new WorkflowEngineError("invalid_request", `${name} must be a safe integer.`);
+  }
+  return parsed;
+};
+
 export function resolveFactoryWorkerConfig(input: FactoryWorkerConfigInput): FactoryWorkerConfig {
   const host = input.host ?? "127.0.0.1";
   if (!LOOPBACK_HOSTS.has(host) && input.allowNonLoopback !== true) {
@@ -44,7 +58,8 @@ export function resolveFactoryWorkerConfig(input: FactoryWorkerConfigInput): Fac
       "Factory worker must bind to loopback unless non-loopback binding is explicitly enabled.",
     );
   }
-  if (input.credential.trim().length < 32) {
+  const credential = input.credential.trim();
+  if (credential.length < 32) {
     throw new WorkflowEngineError(
       "invalid_request",
       "Factory worker credential must contain at least 32 characters.",
@@ -61,19 +76,44 @@ export function resolveFactoryWorkerConfig(input: FactoryWorkerConfigInput): Fac
     input.pollIntervalMilliseconds ?? 50,
     "Factory worker poll interval",
   );
+  if (pollIntervalMilliseconds > MAX_TIMER_MILLISECONDS) {
+    throw new WorkflowEngineError(
+      "invalid_request",
+      `Factory worker poll interval must not exceed ${MAX_TIMER_MILLISECONDS} milliseconds.`,
+    );
+  }
   const leaseMilliseconds = requirePositiveSafeInteger(
     input.leaseMilliseconds ?? 30_000,
     "Factory worker lease duration",
   );
+  if (leaseMilliseconds > MAX_LEASE_MILLISECONDS) {
+    throw new WorkflowEngineError(
+      "invalid_request",
+      `Factory worker lease duration must not exceed ${MAX_LEASE_MILLISECONDS} milliseconds.`,
+    );
+  }
+  const shutdownGraceMilliseconds = requirePositiveSafeInteger(
+    input.shutdownGraceMilliseconds ?? 5_000,
+    "Factory worker shutdown grace period",
+  );
+  if (shutdownGraceMilliseconds > MAX_TIMER_MILLISECONDS) {
+    throw new WorkflowEngineError(
+      "invalid_request",
+      `Factory worker shutdown grace period must not exceed ${MAX_TIMER_MILLISECONDS} milliseconds.`,
+    );
+  }
   return {
     host,
     port,
     stateDirectory,
-    databasePath: input.databasePath ?? NodePath.join(stateDirectory, "factory.sqlite"),
-    credential: input.credential,
+    databasePath: input.databasePath
+      ? NodePath.resolve(stateDirectory, input.databasePath)
+      : NodePath.join(stateDirectory, "factory.sqlite"),
+    credential,
     workerInstanceId: input.workerInstanceId ?? `factory-${process.pid}`,
     pollIntervalMilliseconds,
     leaseMilliseconds,
+    shutdownGraceMilliseconds,
   };
 }
 
@@ -91,8 +131,8 @@ export function configFromEnvironment(
     credential,
     allowNonLoopback: environment.MKCODE_FACTORY_ALLOW_NON_LOOPBACK === "true",
     ...(environment.MKCODE_FACTORY_HOST ? { host: environment.MKCODE_FACTORY_HOST } : {}),
-    ...(environment.MKCODE_FACTORY_PORT
-      ? { port: Number.parseInt(environment.MKCODE_FACTORY_PORT, 10) }
+    ...(environment.MKCODE_FACTORY_PORT !== undefined
+      ? { port: parseEnvironmentInteger(environment.MKCODE_FACTORY_PORT, "MKCODE_FACTORY_PORT") }
       : {}),
     ...(environment.MKCODE_FACTORY_STATE_DIR
       ? { stateDirectory: environment.MKCODE_FACTORY_STATE_DIR }
@@ -103,11 +143,29 @@ export function configFromEnvironment(
     ...(environment.MKCODE_FACTORY_WORKER_ID
       ? { workerInstanceId: environment.MKCODE_FACTORY_WORKER_ID }
       : {}),
-    ...(environment.MKCODE_FACTORY_POLL_MS
-      ? { pollIntervalMilliseconds: Number.parseInt(environment.MKCODE_FACTORY_POLL_MS, 10) }
+    ...(environment.MKCODE_FACTORY_POLL_MS !== undefined
+      ? {
+          pollIntervalMilliseconds: parseEnvironmentInteger(
+            environment.MKCODE_FACTORY_POLL_MS,
+            "MKCODE_FACTORY_POLL_MS",
+          ),
+        }
       : {}),
-    ...(environment.MKCODE_FACTORY_LEASE_MS
-      ? { leaseMilliseconds: Number.parseInt(environment.MKCODE_FACTORY_LEASE_MS, 10) }
+    ...(environment.MKCODE_FACTORY_LEASE_MS !== undefined
+      ? {
+          leaseMilliseconds: parseEnvironmentInteger(
+            environment.MKCODE_FACTORY_LEASE_MS,
+            "MKCODE_FACTORY_LEASE_MS",
+          ),
+        }
+      : {}),
+    ...(environment.MKCODE_FACTORY_SHUTDOWN_GRACE_MS !== undefined
+      ? {
+          shutdownGraceMilliseconds: parseEnvironmentInteger(
+            environment.MKCODE_FACTORY_SHUTDOWN_GRACE_MS,
+            "MKCODE_FACTORY_SHUTDOWN_GRACE_MS",
+          ),
+        }
       : {}),
   });
 }

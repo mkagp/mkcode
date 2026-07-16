@@ -35,6 +35,25 @@ const close = (server: NodeHttp.Server): Promise<void> =>
     });
   });
 
+const waitForPoll = async (
+  currentPoll: Promise<void> | undefined,
+  graceMilliseconds: number,
+): Promise<void> => {
+  if (!currentPoll) return;
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      currentPoll,
+      new Promise<void>((resolve) => {
+        timeout = setTimeout(resolve, graceMilliseconds);
+        timeout.unref();
+      }),
+    ]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+};
+
 export interface RunningFactoryWorker {
   readonly engine: WorkflowEngine;
   readonly server: NodeHttp.Server;
@@ -108,9 +127,12 @@ export async function startFactoryWorker(
       stopped = true;
       simulationWorker.stop();
       clearInterval(interval);
-      await currentPoll;
-      await close(server);
-      engine.close();
+      await waitForPoll(currentPoll, config.shutdownGraceMilliseconds);
+      try {
+        await close(server);
+      } finally {
+        engine.close();
+      }
     },
   };
 }

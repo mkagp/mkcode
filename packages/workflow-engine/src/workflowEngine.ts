@@ -1,7 +1,9 @@
 // @effect-diagnostics nodeBuiltinImport:off
 // @effect-diagnostics globalDate:off -- The synchronous SQLite engine injects its clock explicitly.
 import * as NodeCrypto from "node:crypto";
+import * as NodeBuffer from "node:buffer";
 import * as NodePath from "node:path";
+import * as NodeProcess from "node:process";
 import * as NodeSqlite from "node:sqlite";
 
 import {
@@ -31,10 +33,11 @@ import * as Schema from "effect/Schema";
 import { canonicalJson, digestJson } from "./canonicalJson.ts";
 import { WorkflowEngineError } from "./errors.ts";
 import { migration001Sql } from "./migrations/001_initial.ts";
-import { ensurePrivateDirectory, ensurePrivateFile } from "./statePermissions.ts";
+import { ensurePrivateDirectory, ensurePrivateFile, openPrivateFile } from "./statePermissions.ts";
 
 export const FACTORY_SCHEMA_VERSION = 1;
 export const DEFAULT_LEASE_MILLISECONDS = 30_000;
+export const MAX_LEASE_MILLISECONDS = 86_400_000;
 export const DEFAULT_EVENT_PAGE_LIMIT = 100;
 export const MAX_EVENT_PAGE_LIMIT = 500;
 export const MAX_RETRY_DELAY_MILLISECONDS = 86_400_000;
@@ -69,6 +72,35 @@ export interface ReconciliationResult {
 }
 
 type SqlRow = Record<string, unknown>;
+interface WorkflowListCursor {
+  readonly creationSequence: number;
+}
+
+const encodeWorkflowListCursor = (cursor: WorkflowListCursor): string =>
+  NodeBuffer.Buffer.from(canonicalJson(cursor), "utf8").toString("base64url");
+
+const decodeWorkflowListCursor = (cursor: string): WorkflowListCursor => {
+  try {
+    if (!/^[A-Za-z0-9_-]+$/u.test(cursor)) throw new Error("invalid base64url");
+    const decoded = JSON.parse(
+      NodeBuffer.Buffer.from(cursor, "base64url").toString("utf8"),
+    ) as unknown;
+    if (
+      decoded === null ||
+      typeof decoded !== "object" ||
+      Array.isArray(decoded) ||
+      Object.keys(decoded).length !== 1 ||
+      !("creationSequence" in decoded) ||
+      !Number.isSafeInteger(decoded.creationSequence) ||
+      Number(decoded.creationSequence) <= 0
+    ) {
+      throw new Error("invalid shape");
+    }
+    return { creationSequence: Number(decoded.creationSequence) };
+  } catch {
+    throw new WorkflowEngineError("invalid_cursor", "Workflow-list cursor is invalid.");
+  }
+};
 
 const asString = (row: SqlRow, key: string): string => String(row[key]);
 const asNumber = (row: SqlRow, key: string): number => Number(row[key]);
@@ -116,6 +148,12 @@ export class WorkflowEngine {
   }
 
   static async open(options: WorkflowEngineOptions): Promise<WorkflowEngine> {
+    if (options.stateDirectory.trim().length === 0) {
+      throw new WorkflowEngineError(
+        "invalid_request",
+        "Factory state directory must not be empty.",
+      );
+    }
     const stateDirectory = NodePath.resolve(options.stateDirectory);
     const databasePath = options.databasePath ?? NodePath.join(stateDirectory, "factory.sqlite");
     if (!NodePath.isAbsolute(databasePath)) {
@@ -134,9 +172,20 @@ export class WorkflowEngine {
     }
     await ensurePrivateDirectory(stateDirectory);
     await ensurePrivateDirectory(NodePath.dirname(databasePath));
-    await ensurePrivateFile(databasePath, true);
-
-    const database = new NodeSqlite.DatabaseSync(databasePath);
+    const databaseHandle = await openPrivateFile(databasePath, true);
+    if (!databaseHandle) {
+      throw new WorkflowEngineError("internal_error", "Factory database could not be opened.");
+    }
+    let database: NodeSqlite.DatabaseSync;
+    try {
+      // Linux is the verified deployment target. Keeping this validated descriptor open while
+      // SQLite opens /proc/self/fd closes the final-component symlink replacement window.
+      const sqlitePath =
+        NodeProcess.platform === "linux" ? `/proc/self/fd/${databaseHandle.fd}` : databasePath;
+      database = new NodeSqlite.DatabaseSync(sqlitePath);
+    } finally {
+      await databaseHandle.close();
+    }
     try {
       database.exec("PRAGMA foreign_keys = ON;");
       database.exec("PRAGMA journal_mode = WAL;");
@@ -332,27 +381,46 @@ export class WorkflowEngine {
 
   listWorkflowPage(
     input: {
-      readonly cursor?: number;
+      readonly cursor?: string;
       readonly limit?: number;
     } = {},
   ): WorkflowListResult {
     this.#assertOpen();
-    const cursor = input.cursor ?? 0;
     const limit = input.limit ?? WorkflowListDefaultPageSize;
-    if (!Number.isSafeInteger(cursor) || cursor < 0) {
-      throw new WorkflowEngineError("invalid_cursor", "Workflow-list cursor is invalid.");
-    }
     if (!Number.isSafeInteger(limit) || limit <= 0 || limit > WorkflowListMaximumPageSize) {
       throw new WorkflowEngineError("invalid_request", "Workflow-list page limit is invalid.");
     }
-    const rows = this.#database
-      .prepare("SELECT * FROM workflow_runs ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?")
-      .all(limit + 1, cursor) as ReadonlyArray<SqlRow>;
+    const cursor = input.cursor === undefined ? undefined : decodeWorkflowListCursor(input.cursor);
+    const rows = (
+      cursor === undefined
+        ? this.#database
+            .prepare(
+              `SELECT workflow_runs.*, workflow_runs.rowid AS creation_sequence
+               FROM workflow_runs ORDER BY workflow_runs.rowid DESC LIMIT ?`,
+            )
+            .all(limit + 1)
+        : this.#database
+            .prepare(
+              `SELECT workflow_runs.*, workflow_runs.rowid AS creation_sequence
+               FROM workflow_runs
+               WHERE workflow_runs.rowid < ?
+               ORDER BY workflow_runs.rowid DESC LIMIT ?`,
+            )
+            .all(cursor.creationSequence, limit + 1)
+    ) as ReadonlyArray<SqlRow>;
     const hasMore = rows.length > limit;
-    const runs = rows.slice(0, limit).map(this.#mapWorkflowRun);
+    const pageRows = rows.slice(0, limit);
+    const runs = pageRows.map(this.#mapWorkflowRun);
+    const lastRow = pageRows.at(-1);
     return {
       runs,
-      nextCursor: cursor + runs.length,
+      ...(hasMore && lastRow
+        ? {
+            nextCursor: encodeWorkflowListCursor({
+              creationSequence: asNumber(lastRow, "creation_sequence"),
+            }),
+          }
+        : {}),
       hasMore,
     };
   }
@@ -415,7 +483,8 @@ export class WorkflowEngine {
     if (
       leaseOwner.trim().length === 0 ||
       !Number.isSafeInteger(leaseMilliseconds) ||
-      leaseMilliseconds <= 0
+      leaseMilliseconds <= 0 ||
+      leaseMilliseconds > MAX_LEASE_MILLISECONDS
     ) {
       throw new WorkflowEngineError(
         "invalid_request",
@@ -525,7 +594,8 @@ export class WorkflowEngine {
     if (
       leaseOwner.trim().length === 0 ||
       !Number.isSafeInteger(leaseMilliseconds) ||
-      leaseMilliseconds <= 0
+      leaseMilliseconds <= 0 ||
+      leaseMilliseconds > MAX_LEASE_MILLISECONDS
     ) {
       throw new WorkflowEngineError(
         "invalid_request",

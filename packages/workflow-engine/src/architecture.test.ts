@@ -29,6 +29,12 @@ const sourceFiles = async (root: string): Promise<ReadonlyArray<string>> => {
   return result;
 };
 
+const dependencyVersion = (
+  packageJson: Awaited<ReturnType<typeof readPackage>>,
+  dependency: string,
+): string | undefined =>
+  packageJson.dependencies?.[dependency] ?? packageJson.devDependencies?.[dependency];
+
 describe("factory architecture boundaries", () => {
   it("keeps persistence out of the browser server and UI dependencies out of the worker", async () => {
     const server = await readPackage("apps/server");
@@ -36,15 +42,14 @@ describe("factory architecture boundaries", () => {
     const worker = await readPackage("apps/factory-worker");
     const engine = await readPackage("packages/workflow-engine");
 
-    NodeAssert.equal(server.dependencies?.["@mkcode/workflow-engine"], undefined);
-    NodeAssert.equal(server.devDependencies?.["@mkcode/workflow-engine"], undefined);
-    NodeAssert.equal(server.dependencies?.["@mkcode/factory-worker"], undefined);
-    NodeAssert.equal(web.dependencies?.["@mkcode/workflow-engine"], undefined);
-    NodeAssert.equal(web.dependencies?.["@mkcode/factory-worker"], undefined);
-    NodeAssert.equal(worker.dependencies?.["@t3tools/web"], undefined);
-    NodeAssert.equal(worker.dependencies?.["react"], undefined);
-    NodeAssert.equal(engine.dependencies?.["@t3tools/contracts"], undefined);
-    NodeAssert.equal(engine.dependencies?.["@t3tools/web"], undefined);
+    NodeAssert.equal(dependencyVersion(server, "@mkcode/workflow-engine"), undefined);
+    NodeAssert.equal(dependencyVersion(server, "@mkcode/factory-worker"), undefined);
+    NodeAssert.equal(dependencyVersion(web, "@mkcode/workflow-engine"), undefined);
+    NodeAssert.equal(dependencyVersion(web, "@mkcode/factory-worker"), undefined);
+    NodeAssert.equal(dependencyVersion(worker, "@t3tools/web"), undefined);
+    NodeAssert.equal(dependencyVersion(worker, "react"), undefined);
+    NodeAssert.equal(dependencyVersion(engine, "@t3tools/contracts"), undefined);
+    NodeAssert.equal(dependencyVersion(engine, "@t3tools/web"), undefined);
   });
 
   it("contains no process, command, Git, worktree, or provider launcher in worker production code", async () => {

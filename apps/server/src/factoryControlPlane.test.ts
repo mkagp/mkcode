@@ -10,7 +10,7 @@ import {
   createRegisteredProjectWorkflow,
   FactoryControlPlaneError,
 } from "./factoryControlPlane.ts";
-import { FactoryWorkerClient } from "./factoryWorkerClient.ts";
+import { FactoryWorkerClient, FactoryWorkerClientError } from "./factoryWorkerClient.ts";
 import * as ProjectRegistry from "./projectRegistry.ts";
 
 const isFactoryControlPlaneError = Schema.is(FactoryControlPlaneError);
@@ -89,10 +89,56 @@ describe("factory control plane", () => {
 
       NodeAssert.deepEqual(calls, ["read", "validate", "create"]);
       NodeAssert.equal(forwarded?.projectSnapshot.contentDigest, "fresh-digest");
+      NodeAssert.equal(result._tag, "Failure");
+      if (result._tag !== "Failure") {
+        NodeAssert.fail("Expected workflow creation to fail.");
+      }
+      NodeAssert.ok(isFactoryControlPlaneError(result.failure));
+      if (!isFactoryControlPlaneError(result.failure)) {
+        NodeAssert.fail("Expected a FactoryControlPlaneError.");
+      }
+      NodeAssert.equal(result.failure.code, "worker_unavailable");
       NodeAssert.equal(
-        result._tag === "Failure" && isFactoryControlPlaneError(result.failure),
-        true,
+        result.failure.message,
+        "The factory worker could not accept the workflow request.",
       );
+      NodeAssert.ok(result.failure.cause instanceof Error);
+    }),
+  );
+
+  it.effect("preserves deterministic worker rejection semantics", () =>
+    Effect.gen(function* () {
+      const stored = registration("fresh-digest");
+      const registry = ProjectRegistry.ProjectRegistry.of({
+        register: () => Effect.succeed(stored),
+        list: Effect.succeed([stored]),
+        read: () => Effect.succeed(stored),
+        validate: () => Effect.succeed(stored),
+        disable: () => Effect.succeed({ ...stored, enabled: false, validationStatus: "disabled" }),
+        enable: () => Effect.succeed(stored),
+      });
+      const conflict = new FactoryWorkerClientError(409, {
+        code: "conflict",
+        message: "Idempotency conflict.",
+      });
+      const client = {
+        createWorkflow: () => Promise.reject(conflict),
+      } as unknown as FactoryWorkerClient;
+
+      const result = yield* Effect.result(
+        createRegisteredProjectWorkflow(client, {
+          projectId: "project-1",
+          idempotencyKey: "request-conflict",
+          title: "Title",
+          description: "Description",
+          source: "manual",
+          workflowType: "feature",
+          requestedBy: "operator",
+        }),
+      ).pipe(Effect.provideService(ProjectRegistry.ProjectRegistry, registry));
+
+      NodeAssert.equal(result._tag, "Failure");
+      if (result._tag === "Failure") NodeAssert.equal(result.failure, conflict);
     }),
   );
 });

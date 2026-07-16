@@ -126,19 +126,18 @@ const decodeIdentifier = (value: string): string => {
   }
 };
 
-const workflowListPagination = (url: URL): { readonly cursor: number; readonly limit: number } => {
+const workflowListPagination = (url: URL): { readonly cursor?: string; readonly limit: number } => {
   const cursorText = url.searchParams.get("cursor");
   const limitText = url.searchParams.get("limit");
-  const cursor = cursorText === null ? 0 : Number(cursorText);
   const requestedLimit = limitText === null ? WorkflowListDefaultPageSize : Number(limitText);
-  if (!Number.isSafeInteger(cursor) || cursor < 0) {
+  if (cursorText !== null && cursorText.length === 0) {
     throw new WorkflowEngineError("invalid_cursor", "Workflow-list cursor is invalid.");
   }
   if (!Number.isSafeInteger(requestedLimit) || requestedLimit <= 0) {
     throw new WorkflowEngineError("invalid_request", "Workflow-list page limit is invalid.");
   }
   return {
-    cursor,
+    ...(cursorText === null ? {} : { cursor: cursorText }),
     limit: Math.min(requestedLimit, WorkflowListMaximumPageSize),
   };
 };

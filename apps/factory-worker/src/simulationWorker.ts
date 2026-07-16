@@ -1,3 +1,6 @@
+// @effect-diagnostics globalTimers:off -- Simulation deadlines protect durable leases.
+import * as NodeTimers from "node:timers";
+
 import type { ClaimedJob, WorkflowEngine } from "@mkcode/workflow-engine";
 
 export type SimulationOutcome =
@@ -10,15 +13,42 @@ export type SimulationOutcome =
     }
   | { readonly kind: "terminal_failure"; readonly summary: string };
 
-export type SimulationHandler = (claimed: ClaimedJob) => Promise<SimulationOutcome>;
+export type SimulationHandler = (
+  claimed: ClaimedJob,
+  signal: AbortSignal,
+) => Promise<SimulationOutcome>;
 
 const defaultHandler: SimulationHandler = async () => ({ kind: "success" });
+
+class SimulationDeadlineError extends Error {}
+
+const waitForSettlement = async (
+  promise: Promise<unknown>,
+  graceMilliseconds: number,
+): Promise<boolean> => {
+  let timeout: ReturnType<typeof NodeTimers.setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise.then(
+        () => true,
+        () => true,
+      ),
+      new Promise<false>((resolve) => {
+        timeout = NodeTimers.setTimeout(() => resolve(false), graceMilliseconds);
+        timeout.unref();
+      }),
+    ]);
+  } finally {
+    if (timeout) NodeTimers.clearTimeout(timeout);
+  }
+};
 
 export class SimulationWorker {
   readonly #engine: WorkflowEngine;
   readonly #workerInstanceId: string;
   readonly #leaseMilliseconds: number;
   readonly #handler: SimulationHandler;
+  #activeController: AbortController | undefined;
   #stopping = false;
 
   constructor(input: {
@@ -35,6 +65,7 @@ export class SimulationWorker {
 
   stop(): void {
     this.#stopping = true;
+    this.#activeController?.abort();
   }
 
   async runOnce(): Promise<boolean> {
@@ -43,9 +74,34 @@ export class SimulationWorker {
     if (!claimed) return false;
 
     let outcome: SimulationOutcome;
+    const controller = new AbortController();
+    this.#activeController = controller;
+    const deadlineMilliseconds = Math.max(1, Math.floor(this.#leaseMilliseconds / 2));
+    const abortGraceMilliseconds = Math.max(1, Math.floor(this.#leaseMilliseconds / 4));
+    let deadline: ReturnType<typeof NodeTimers.setTimeout> | undefined;
+    let handler: Promise<SimulationOutcome> | undefined;
     try {
-      outcome = await this.#handler(claimed);
-    } catch {
+      handler = this.#handler(claimed, controller.signal);
+      outcome = await Promise.race([
+        handler,
+        new Promise<never>((_resolve, reject) => {
+          deadline = NodeTimers.setTimeout(() => {
+            controller.abort();
+            reject(new SimulationDeadlineError());
+          }, deadlineMilliseconds);
+          deadline.unref();
+        }),
+      ]);
+    } catch (cause) {
+      controller.abort();
+      if (
+        this.#stopping ||
+        (cause instanceof SimulationDeadlineError &&
+          handler !== undefined &&
+          !(await waitForSettlement(handler, abortGraceMilliseconds)))
+      ) {
+        return true;
+      }
       this.#engine.failJob({
         jobId: claimed.job.id,
         leaseOwner: this.#workerInstanceId,
@@ -54,7 +110,12 @@ export class SimulationWorker {
         expectedStageVersion: claimed.stageVersion,
       });
       return true;
+    } finally {
+      if (deadline) NodeTimers.clearTimeout(deadline);
+      controller.abort();
+      if (this.#activeController === controller) this.#activeController = undefined;
     }
+    if (this.#stopping) return true;
     if (outcome.kind === "success") {
       this.#engine.completeJob(
         claimed.job.id,

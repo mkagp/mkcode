@@ -14,7 +14,7 @@ import type {
   WorkflowDetail,
 } from "@mkcode/factory-contracts";
 
-import { resolveFactoryWorkerConfig } from "./config.ts";
+import { configFromEnvironment, resolveFactoryWorkerConfig } from "./config.ts";
 import { startFactoryWorker, type RunningFactoryWorker } from "./runtime.ts";
 
 const credential = "factory-test-credential-0123456789abcdef";
@@ -115,12 +115,12 @@ describe("factory worker API", () => {
       NodeAssert.equal(createdResponse.status, 201);
       const workflowPage = await api<{
         runs: ReadonlyArray<unknown>;
-        nextCursor: number;
+        nextCursor?: string;
         hasMore: boolean;
       }>(worker, "/v1/workflows?limit=999");
       NodeAssert.equal(workflowPage.status, 200);
       NodeAssert.equal(workflowPage.body.runs.length, 1);
-      NodeAssert.equal(workflowPage.body.nextCursor, 1);
+      NodeAssert.equal(workflowPage.body.nextCursor, undefined);
       NodeAssert.equal(workflowPage.body.hasMore, false);
       const invalidCursor = await api<{ code: string }>(worker, "/v1/workflows?cursor=-1");
       NodeAssert.equal(invalidCursor.status, 400);
@@ -249,6 +249,12 @@ describe("factory worker API", () => {
       }).host,
       "0.0.0.0",
     );
+    NodeAssert.equal(
+      resolveFactoryWorkerConfig({
+        credential: `  ${credential}  `,
+      }).credential,
+      credential,
+    );
     for (const invalidDuration of [0, -1, Number.NaN, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
       NodeAssert.throws(() =>
         resolveFactoryWorkerConfig({
@@ -263,6 +269,100 @@ describe("factory worker API", () => {
         }),
       );
     }
+    for (const invalidValue of ["", "4317junk", "1.5", "1e3", " 4317"]) {
+      for (const variable of [
+        "MKCODE_FACTORY_PORT",
+        "MKCODE_FACTORY_POLL_MS",
+        "MKCODE_FACTORY_LEASE_MS",
+        "MKCODE_FACTORY_SHUTDOWN_GRACE_MS",
+      ] as const) {
+        NodeAssert.throws(() =>
+          configFromEnvironment({
+            MKCODE_FACTORY_TOKEN: credential,
+            [variable]: invalidValue,
+          }),
+        );
+      }
+    }
+  });
+
+  it("resolves an explicit relative database path inside the state directory", () => {
+    const stateDirectory = NodePath.join(NodeOS.tmpdir(), "mkcode-relative-database");
+    const config = resolveFactoryWorkerConfig({
+      credential,
+      stateDirectory,
+      databasePath: "nested/factory.sqlite",
+    });
+    NodeAssert.equal(
+      config.databasePath,
+      NodePath.join(stateDirectory, "nested", "factory.sqlite"),
+    );
+  });
+
+  it("bounds shutdown when a simulation handler does not settle", async () => {
+    const root = await makeRoot();
+    let releaseHandler: (() => void) | undefined;
+    const handlerStarted = Promise.withResolvers<void>();
+    const handlerRelease = new Promise<void>((resolve) => {
+      releaseHandler = resolve;
+    });
+    const worker = await startFactoryWorker(
+      resolveFactoryWorkerConfig({
+        host: "127.0.0.1",
+        port: 0,
+        stateDirectory: NodePath.join(root, "state"),
+        credential,
+        pollIntervalMilliseconds: 5,
+        leaseMilliseconds: 1_000,
+        shutdownGraceMilliseconds: 20,
+      }),
+      async () => {
+        handlerStarted.resolve();
+        await handlerRelease;
+        return { kind: "success" };
+      },
+    );
+    try {
+      await api<WorkflowCreateResult>(worker, "/v1/workflows", {
+        method: "POST",
+        body: makeRequest(root, "bounded-shutdown"),
+      });
+      await handlerStarted.promise;
+      const result = await Promise.race([
+        worker.stop().then(() => "stopped" as const),
+        new Promise<"timed-out">((resolve) => setTimeout(() => resolve("timed-out"), 100)),
+      ]);
+      NodeAssert.equal(result, "stopped");
+    } finally {
+      releaseHandler?.();
+      await worker.stop();
+      await NodeFSP.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("closes persistence even when the HTTP listener is already closed", async () => {
+    const root = await makeRoot();
+    const worker = await startFactoryWorker(
+      resolveFactoryWorkerConfig({
+        host: "127.0.0.1",
+        port: 0,
+        stateDirectory: NodePath.join(root, "state"),
+        credential,
+      }),
+    );
+    try {
+      await new Promise<void>((resolve, reject) => {
+        worker.server.close((cause) => {
+          if (cause) reject(cause);
+          else resolve();
+        });
+      });
+      await NodeAssert.rejects(() => worker.stop());
+      NodeAssert.throws(() => worker.engine.listWorkflows());
+    } finally {
+      await worker.stop().catch(() => undefined);
+      await NodeFSP.rm(root, { recursive: true, force: true });
+    }
   });
 
   it("turns unexpected simulation handler failures into bounded durable retries", async () => {
@@ -276,7 +376,7 @@ describe("factory worker API", () => {
         pollIntervalMilliseconds: 5,
         leaseMilliseconds: 1_000,
       }),
-      async () => {
+      () => {
         throw new Error("controlled handler rejection");
       },
     );
@@ -292,6 +392,38 @@ describe("factory worker API", () => {
         failed.attempts.every((attempt) => attempt.status === "failed"),
         true,
       );
+    } finally {
+      await worker.stop();
+      await NodeFSP.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("aborts simulation handlers before their durable lease can expire", async () => {
+    const root = await makeRoot();
+    const worker = await startFactoryWorker(
+      resolveFactoryWorkerConfig({
+        host: "127.0.0.1",
+        port: 0,
+        stateDirectory: NodePath.join(root, "state"),
+        credential,
+        pollIntervalMilliseconds: 5,
+        leaseMilliseconds: 100,
+      }),
+      async (_claimed, signal) =>
+        new Promise((_resolve, reject) => {
+          signal.addEventListener("abort", () => reject(new Error("deadline reached")), {
+            once: true,
+          });
+        }),
+    );
+    try {
+      const created = await api<WorkflowCreateResult>(worker, "/v1/workflows", {
+        method: "POST",
+        body: makeRequest(root, "handler-deadline"),
+      });
+      const failed = await waitForStatus(worker, created.body.workflowRun.id, "failed");
+      NodeAssert.equal(failed.attempts.length, 3);
+      NodeAssert.equal(failed.jobs[0]?.status, "failed");
     } finally {
       await worker.stop();
       await NodeFSP.rm(root, { recursive: true, force: true });

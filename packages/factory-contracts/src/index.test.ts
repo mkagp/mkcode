@@ -72,6 +72,13 @@ describe("factory contracts", () => {
 
     NodeAssert.doesNotThrow(() => decode(request));
     NodeAssert.throws(() => decode({ ...request, unexpected: true }));
+    for (const invalidRequest of [
+      { ...request, idempotencyKey: " " },
+      { ...request, workItem: { ...request.workItem, projectId: "" } },
+      { ...request, requestedBy: "\t" },
+    ]) {
+      NodeAssert.throws(() => decode(invalidRequest));
+    }
   });
 
   it("rejects fractional and out-of-range counters", () => {

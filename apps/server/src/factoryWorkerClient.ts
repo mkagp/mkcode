@@ -2,8 +2,8 @@
 import {
   ApprovalResolveRequest,
   EventsListResult,
+  FactoryApiError,
   FactoryHealth,
-  type FactoryApiError,
   WorkflowCancelRequest,
   WorkflowCreateRequest,
   WorkflowCreateResult,
@@ -22,6 +22,7 @@ import * as NodeTimers from "node:timers";
 import * as Schema from "effect/Schema";
 
 const DEFAULT_REQUEST_TIMEOUT_MILLISECONDS = 10_000;
+const MAX_REQUEST_TIMEOUT_MILLISECONDS = 2_147_483_647;
 
 const decodeHealth = Schema.decodeUnknownSync(FactoryHealth, { onExcessProperty: "error" });
 const decodeCreateResult = Schema.decodeUnknownSync(WorkflowCreateResult, {
@@ -34,6 +35,9 @@ const decodeWorkflowList = Schema.decodeUnknownSync(WorkflowListResult, {
   onExcessProperty: "error",
 });
 const decodeEvents = Schema.decodeUnknownSync(EventsListResult, {
+  onExcessProperty: "error",
+});
+const decodeApiError = Schema.decodeUnknownSync(FactoryApiError, {
   onExcessProperty: "error",
 });
 const encodeCreate = Schema.encodeSync(WorkflowCreateRequest);
@@ -76,8 +80,14 @@ export class FactoryWorkerClient {
     readonly timeoutMilliseconds?: number;
   }) {
     const timeoutMilliseconds = input.timeoutMilliseconds ?? DEFAULT_REQUEST_TIMEOUT_MILLISECONDS;
-    if (!Number.isSafeInteger(timeoutMilliseconds) || timeoutMilliseconds <= 0) {
-      throw new TypeError("Factory worker request timeout must be a positive safe integer.");
+    if (
+      !Number.isSafeInteger(timeoutMilliseconds) ||
+      timeoutMilliseconds <= 0 ||
+      timeoutMilliseconds > MAX_REQUEST_TIMEOUT_MILLISECONDS
+    ) {
+      throw new TypeError(
+        `Factory worker request timeout must be between 1 and ${MAX_REQUEST_TIMEOUT_MILLISECONDS} milliseconds.`,
+      );
     }
     this.#origin = input.origin.replace(/\/+$/u, "");
     this.#credential = input.credential;
@@ -99,7 +109,7 @@ export class FactoryWorkerClient {
   }
 
   async listWorkflows(
-    input: { readonly cursor?: number; readonly limit?: number } = {},
+    input: { readonly cursor?: string; readonly limit?: number } = {},
   ): Promise<WorkflowListResultType> {
     const query = new URLSearchParams();
     if (input.cursor !== undefined) query.set("cursor", String(input.cursor));
@@ -169,18 +179,15 @@ export class FactoryWorkerClient {
       });
       const body = await responseJson(response);
       if (!response.ok) {
-        const error =
-          typeof body === "object" &&
-          body !== null &&
-          "code" in body &&
-          "message" in body &&
-          typeof body.code === "string" &&
-          typeof body.message === "string"
-            ? (body as FactoryApiError)
-            : ({
-                code: "internal_error",
-                message: "Factory worker request failed.",
-              } satisfies FactoryApiError);
+        let error: FactoryApiError;
+        try {
+          error = decodeApiError(body);
+        } catch {
+          error = {
+            code: "internal_error",
+            message: "Factory worker request failed.",
+          };
+        }
         throw new FactoryWorkerClientError(response.status, error);
       }
       return body;

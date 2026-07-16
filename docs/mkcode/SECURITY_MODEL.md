@@ -152,9 +152,12 @@ serializes it for a browser.
 
 Factory state is independent of interactive server state. The worker enforces
 `0700` on its state directory and `0600` on the database and SQLite WAL/shared
-memory files. It opens state files with `O_NOFOLLOW` and checks path components
-for symlinks before creation/chmod. This has been verified on Linux; pathname
-races and Windows ACL semantics require a later deployment-hardening review.
+memory files. On Linux, it walks state paths relative to validated directory
+descriptors, uses `O_NOFOLLOW`, and opens SQLite through the already-validated
+database descriptor. This closes writable-ancestor and final-component symlink
+replacement windows during creation and chmod. The portable fallback still uses
+snapshot path checks; Windows ACL and non-Linux pathname-race semantics require
+a later deployment-hardening review.
 
 The API accepts only schema-validated workflow metadata, immutable resolved
 project snapshots, cancellation actors, approval decisions, and event queries.

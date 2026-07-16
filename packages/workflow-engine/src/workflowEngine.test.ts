@@ -4,6 +4,7 @@ import * as NodeAssert from "node:assert/strict";
 import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
+import * as NodeProcess from "node:process";
 import * as NodeSqlite from "node:sqlite";
 
 import { describe, it } from "@effect/vitest";
@@ -40,6 +41,12 @@ const advanceToHumanReview = (engine: WorkflowEngine, owner = "worker-a") => {
 };
 
 describe("WorkflowEngine persistence", () => {
+  it("rejects a blank state directory without touching the current working directory", async () => {
+    const modeBefore = permissionBits((await NodeFS.stat(NodeProcess.cwd())).mode);
+    await NodeAssert.rejects(() => WorkflowEngine.open({ stateDirectory: " " }));
+    NodeAssert.equal(permissionBits((await NodeFS.stat(NodeProcess.cwd())).mode), modeBefore);
+  });
+
   it("creates a private standalone database and reopens it without rerunning migrations", async () => {
     const root = await makeRoot();
     try {
@@ -124,6 +131,29 @@ describe("WorkflowEngine persistence", () => {
 
       await NodeAssert.rejects(() => WorkflowEngine.open({ stateDirectory }));
       NodeAssert.equal(permissionBits((await NodeFS.stat(externalDatabasePath)).mode), 0o644);
+    } finally {
+      await NodeFS.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a symlinked database parent without modifying its target", async () => {
+    const root = await makeRoot();
+    const stateDirectory = NodePath.join(root, "factory-state");
+    const externalDirectory = NodePath.join(root, "external");
+    try {
+      await NodeFS.mkdir(stateDirectory, { mode: 0o700 });
+      await NodeFS.mkdir(externalDirectory, { mode: 0o755 });
+      await NodeFS.symlink(externalDirectory, NodePath.join(stateDirectory, "nested"));
+      await NodeAssert.rejects(() =>
+        WorkflowEngine.open({
+          stateDirectory,
+          databasePath: NodePath.join(stateDirectory, "nested", "factory.sqlite"),
+        }),
+      );
+      NodeAssert.equal(permissionBits((await NodeFS.stat(externalDirectory)).mode), 0o755);
+      await NodeAssert.rejects(() =>
+        NodeFS.stat(NodePath.join(externalDirectory, "factory.sqlite")),
+      );
     } finally {
       await NodeFS.rm(root, { recursive: true, force: true });
     }
@@ -214,18 +244,51 @@ describe("WorkflowEngine transactions and idempotency", () => {
       NodeAssert.equal(second.workItem.id, workItemId);
       NodeAssert.equal(engine.listWorkflows().length, 2);
       const firstPage = engine.listWorkflowPage({ limit: 1 });
+      const firstPageCursor = firstPage.nextCursor;
+      NodeAssert.ok(firstPageCursor);
       const secondPage = engine.listWorkflowPage({
-        cursor: firstPage.nextCursor,
+        cursor: firstPageCursor,
         limit: 1,
       });
       NodeAssert.equal(firstPage.runs.length, 1);
       NodeAssert.equal(firstPage.hasMore, true);
       NodeAssert.equal(secondPage.runs.length, 1);
       NodeAssert.equal(secondPage.hasMore, false);
+      NodeAssert.equal(secondPage.nextCursor, undefined);
       NodeAssert.notEqual(firstPage.runs[0]?.id, secondPage.runs[0]?.id);
       engine.close();
     } finally {
       await NodeFS.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps workflow pagination stable when a newer run is inserted between pages", async () => {
+    const root = await makeRoot();
+    let now = Date.parse("2026-01-01T00:00:00.000Z");
+    let engine: WorkflowEngine | undefined;
+    try {
+      engine = await openEngine(root, { clock: () => new Date(now) });
+      const oldest = engine.createWorkflow(makeCreateRequest(root, "oldest-run"));
+      now += 1_000;
+      const middle = engine.createWorkflow(makeCreateRequest(root, "middle-run"));
+      const firstPage = engine.listWorkflowPage({ limit: 1 });
+      NodeAssert.equal(firstPage.runs[0]?.id, middle.workflowRun.id);
+      const firstPageCursor = firstPage.nextCursor;
+      NodeAssert.ok(firstPageCursor);
+
+      now += 1_000;
+      engine.createWorkflow(makeCreateRequest(root, "newest-run"));
+      const secondPage = engine.listWorkflowPage({
+        cursor: firstPageCursor,
+        limit: 1,
+      });
+      NodeAssert.equal(secondPage.runs[0]?.id, oldest.workflowRun.id);
+    } finally {
+      try {
+        engine?.close();
+      } finally {
+        await NodeFS.rm(root, { recursive: true, force: true });
+      }
     }
   });
 
@@ -300,6 +363,11 @@ describe("WorkflowEngine claims, leases, and retries", () => {
             cause instanceof WorkflowEngineError && cause.code === "invalid_request",
         );
       }
+      NodeAssert.throws(
+        () => engine.claimNextJob("worker-a", Number.MAX_SAFE_INTEGER),
+        (cause: unknown) =>
+          cause instanceof WorkflowEngineError && cause.code === "invalid_request",
+      );
       engine.close();
     } finally {
       await NodeFS.rm(root, { recursive: true, force: true });
