@@ -10,6 +10,7 @@ import * as NodeSqlite from "node:sqlite";
 import { describe, it } from "@effect/vitest";
 
 import { WorkflowEngineError } from "./errors.ts";
+import { migration001Sql } from "./migrations/001_initial.ts";
 import {
   FACTORY_SCHEMA_VERSION,
   WorkflowEngine,
@@ -85,6 +86,62 @@ describe("WorkflowEngine persistence", () => {
           cause instanceof WorkflowEngineError && cause.code === "unsupported_schema",
       );
     } finally {
+      await NodeFS.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("transactionally migrates an existing schema-1 database to command runs", async () => {
+    const root = await makeRoot();
+    const stateDirectory = NodePath.join(root, "factory-state");
+    const databasePath = NodePath.join(stateDirectory, "factory.sqlite");
+    let database: NodeSqlite.DatabaseSync | undefined;
+    let engine: WorkflowEngine | undefined;
+    let inspected: NodeSqlite.DatabaseSync | undefined;
+    let reopened: WorkflowEngine | undefined;
+    try {
+      await NodeFS.mkdir(stateDirectory, { recursive: true, mode: 0o700 });
+      database = new NodeSqlite.DatabaseSync(databasePath);
+      database.exec("PRAGMA foreign_keys = ON;");
+      database.exec("BEGIN EXCLUSIVE;");
+      database.exec(migration001Sql);
+      database.exec("PRAGMA user_version = 1;");
+      database.exec("COMMIT;");
+      database.close();
+      database = undefined;
+      await NodeFS.chmod(databasePath, 0o600);
+
+      engine = await WorkflowEngine.open({ stateDirectory });
+      NodeAssert.equal(engine.schemaVersion, 2);
+      engine.close();
+      engine = undefined;
+      inspected = new NodeSqlite.DatabaseSync(databasePath);
+      NodeAssert.equal(
+        (inspected.prepare("PRAGMA user_version").get() as { readonly user_version: number })
+          .user_version,
+        2,
+      );
+      NodeAssert.equal(
+        (
+          inspected
+            .prepare(
+              "SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = 'command_runs'",
+            )
+            .get() as { readonly count: number }
+        ).count,
+        1,
+      );
+      inspected.close();
+      inspected = undefined;
+
+      reopened = await WorkflowEngine.open({ stateDirectory });
+      NodeAssert.equal(reopened.schemaVersion, 2);
+      reopened.close();
+      reopened = undefined;
+    } finally {
+      database?.close();
+      engine?.close();
+      inspected?.close();
+      reopened?.close();
       await NodeFS.rm(root, { recursive: true, force: true });
     }
   });
