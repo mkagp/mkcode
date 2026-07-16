@@ -119,6 +119,25 @@ describe("server state permissions", () => {
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
 
+  it.effect("traverses execute-only ancestor directories", () =>
+    Effect.gen(function* () {
+      if (NodeProcess.platform !== "linux") return;
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "mkcode-state-search-only-" });
+      const searchOnly = path.join(root, "search-only");
+      const stateDirectory = path.join(searchOnly, "userdata");
+      yield* fs.makeDirectory(stateDirectory, { recursive: true, mode: 0o755 });
+      yield* fs.chmod(searchOnly, 0o111);
+
+      yield* ensurePrivateDirectory(stateDirectory).pipe(
+        Effect.ensuring(fs.chmod(searchOnly, 0o700).pipe(Effect.orDie)),
+      );
+
+      assert.equal(permissionBits((yield* fs.stat(stateDirectory)).mode), PRIVATE_DIRECTORY_MODE);
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
   it.effect("corrects an existing overly broad regular file to mode 0600", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;

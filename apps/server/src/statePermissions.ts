@@ -11,6 +11,8 @@ import * as PlatformError from "effect/PlatformError";
 
 export const PRIVATE_DIRECTORY_MODE = 0o700;
 export const PRIVATE_FILE_MODE = 0o600;
+// Linux defines O_PATH as 010000000, but Node does not currently expose it in fs.constants.
+const LINUX_O_PATH = 0o10_000_000;
 
 const nodeErrorCode = (cause: unknown): string | undefined =>
   typeof cause === "object" && cause !== null && "code" in cause && typeof cause.code === "string"
@@ -93,7 +95,7 @@ const openLinuxPathWithoutSymlinks = Effect.fn("StatePermissions.openLinuxPathWi
     }
     let currentHandle = yield* openScoped(
       parsedPath.root,
-      NodeFS.constants.O_RDONLY | NodeFS.constants.O_DIRECTORY,
+      LINUX_O_PATH | NodeFS.constants.O_DIRECTORY,
       input.path,
     );
 
@@ -101,7 +103,7 @@ const openLinuxPathWithoutSymlinks = Effect.fn("StatePermissions.openLinuxPathWi
       const isFinalComponent = index === components.length - 1;
       // A FIFO or device must reach fstat without blocking this validation.
       const flags =
-        NodeFS.constants.O_RDONLY |
+        (isFinalComponent ? NodeFS.constants.O_RDONLY : LINUX_O_PATH) |
         NodeFS.constants.O_NOFOLLOW |
         (isFinalComponent && input.expectedType === "File" ? NodeFS.constants.O_NONBLOCK : 0) |
         (!isFinalComponent || input.expectedType === "Directory"
