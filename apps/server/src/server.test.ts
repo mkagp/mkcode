@@ -92,6 +92,7 @@ import * as PortScanner from "./preview/PortScanner.ts";
 import * as BrowserTraceCollector from "./observability/BrowserTraceCollector.ts";
 import * as ProjectFaviconResolver from "./project/ProjectFaviconResolver.ts";
 import * as ProjectSetupScriptRunner from "./project/ProjectSetupScriptRunner.ts";
+import * as ProjectRegistry from "./projectRegistry.ts";
 import * as RepositoryIdentityResolver from "./project/RepositoryIdentityResolver.ts";
 import * as ServerEnvironment from "./environment/ServerEnvironment.ts";
 import * as WorkspaceEntries from "./workspace/WorkspaceEntries.ts";
@@ -801,6 +802,7 @@ const buildAppUnderTest = (options?: {
       ),
       Layer.provideMerge(makeAuthTestLayer()),
       Layer.provideMerge(ServerSecretStore.layer),
+      Layer.provide(ProjectRegistry.layer.pipe(Layer.provide(layerConfig))),
       Layer.provide(workspaceAndProjectServicesLayer),
       Layer.provideMerge(FetchHttpClient.layer),
       Layer.provide(layerConfig),
@@ -4405,6 +4407,76 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.isAtLeast(response.entries.length, 1);
       assert.isTrue(response.entries.some((entry) => entry.path === "needle-file.ts"));
       assert.equal(response.truncated, false);
+    }).pipe(Effect.provide(NodeHttpServer.layerTest), TestClock.withLive),
+  );
+
+  it.effect("routes authenticated projectRegistry registration and inspection RPCs", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const repository = yield* fs.makeTempDirectoryScoped({
+        prefix: "mkcode-ws-project-registry-",
+      });
+      const movedRepository = `${repository}-moved`;
+      yield* fs.makeDirectory(path.join(repository, ".git"));
+      yield* fs.makeDirectory(path.join(repository, ".mkcode"));
+      yield* fs.writeFileString(
+        path.join(repository, ".mkcode", "project.yaml"),
+        `version: 1
+project:
+  id: websocket-project
+  name: WebSocket Project
+repository:
+  baseBranch: main
+checks: []
+execution:
+  defaultProfile: coding-workhorse
+`,
+      );
+
+      yield* buildAppUnderTest();
+
+      const wsUrl = yield* getWsServerUrl("/ws");
+      const response = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          Effect.gen(function* () {
+            const registered = yield* client[WS_METHODS.projectRegistryRegister]({
+              repositoryPath: repository,
+            });
+            const listed = yield* client[WS_METHODS.projectRegistryList]({});
+            const disabled = yield* client[WS_METHODS.projectRegistryDisable]({
+              projectId: registered.projectId,
+            });
+            const enabled = yield* client[WS_METHODS.projectRegistryEnable]({
+              projectId: registered.projectId,
+            });
+            const read = yield* client[WS_METHODS.projectRegistryRead]({
+              projectId: registered.projectId,
+            });
+            yield* fs.rename(repository, movedRepository);
+            const unavailable = yield* client[WS_METHODS.projectRegistryValidate]({
+              projectId: registered.projectId,
+            }).pipe(Effect.ensuring(fs.rename(movedRepository, repository).pipe(Effect.orDie)));
+            const restored = yield* client[WS_METHODS.projectRegistryValidate]({
+              projectId: registered.projectId,
+            });
+            return { registered, listed, disabled, enabled, read, unavailable, restored };
+          }),
+        ),
+      );
+
+      assert.equal(response.registered.projectId, "websocket-project");
+      assert.equal(response.listed.projects.length, 1);
+      assert.equal(response.disabled.validationStatus, "disabled");
+      assert.equal(response.enabled.validationStatus, "valid");
+      assert.equal(response.read.configurationDigest, response.registered.configurationDigest);
+      assert.equal(response.unavailable.validationStatus, "invalid");
+      assert.equal(response.unavailable.validationErrors[0]?.code, "repository_not_found");
+      assert.equal(
+        response.unavailable.configurationDigest,
+        response.registered.configurationDigest,
+      );
+      assert.equal(response.restored.validationStatus, "valid");
     }).pipe(Effect.provide(NodeHttpServer.layerTest), TestClock.withLive),
   );
 

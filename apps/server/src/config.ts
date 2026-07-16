@@ -14,6 +14,8 @@ import * as LogLevel from "effect/LogLevel";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 
+import * as StatePermissions from "./statePermissions.ts";
+
 export const DEFAULT_PORT = 3773;
 
 export const RuntimeMode = Schema.Literals(["web", "desktop"]);
@@ -30,6 +32,7 @@ export interface ServerDerivedPaths {
   readonly dbPath: string;
   readonly keybindingsConfigPath: string;
   readonly settingsPath: string;
+  readonly projectRegistrationsPath: string;
   readonly providerStatusCacheDir: string;
   readonly worktreesDir: string;
   readonly attachmentsDir: string;
@@ -104,6 +107,7 @@ export const deriveServerPaths = Effect.fn(function* (
     dbPath,
     keybindingsConfigPath: join(stateDir, "keybindings.json"),
     settingsPath: join(stateDir, "settings.json"),
+    projectRegistrationsPath: join(stateDir, "project-registrations.json"),
     providerStatusCacheDir,
     worktreesDir: join(baseDir, "worktrees"),
     attachmentsDir,
@@ -121,25 +125,24 @@ export const deriveServerPaths = Effect.fn(function* (
 });
 
 export const ensureServerDirectories = Effect.fn(function* (derivedPaths: ServerDerivedPaths) {
-  const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
 
-  yield* Effect.all(
-    [
-      fs.makeDirectory(derivedPaths.stateDir, { recursive: true }),
-      fs.makeDirectory(derivedPaths.logsDir, { recursive: true }),
-      fs.makeDirectory(derivedPaths.providerLogsDir, { recursive: true }),
-      fs.makeDirectory(derivedPaths.terminalLogsDir, { recursive: true }),
-      fs.makeDirectory(derivedPaths.attachmentsDir, { recursive: true }),
-      fs.makeDirectory(derivedPaths.worktreesDir, { recursive: true }),
-      fs.makeDirectory(path.dirname(derivedPaths.keybindingsConfigPath), { recursive: true }),
-      fs.makeDirectory(path.dirname(derivedPaths.settingsPath), { recursive: true }),
-      fs.makeDirectory(derivedPaths.providerStatusCacheDir, { recursive: true }),
-      fs.makeDirectory(path.dirname(derivedPaths.anonymousIdPath), { recursive: true }),
-      fs.makeDirectory(path.dirname(derivedPaths.serverRuntimeStatePath), { recursive: true }),
-    ],
-    { concurrency: "unbounded" },
-  );
+  const directories = new Set([
+    derivedPaths.stateDir,
+    derivedPaths.logsDir,
+    derivedPaths.providerLogsDir,
+    derivedPaths.terminalLogsDir,
+    derivedPaths.attachmentsDir,
+    derivedPaths.worktreesDir,
+    derivedPaths.secretsDir,
+    path.dirname(derivedPaths.keybindingsConfigPath),
+    path.dirname(derivedPaths.settingsPath),
+    path.dirname(derivedPaths.projectRegistrationsPath),
+    derivedPaths.providerStatusCacheDir,
+    path.dirname(derivedPaths.anonymousIdPath),
+    path.dirname(derivedPaths.serverRuntimeStatePath),
+  ]);
+  yield* Effect.forEach(directories, StatePermissions.ensurePrivateDirectory);
 });
 
 const makeTest = Effect.fn("ServerConfig.makeTest")(function* (
@@ -185,7 +188,21 @@ const makeTest = Effect.fn("ServerConfig.makeTest")(function* (
 });
 
 export const layerTest = (cwd: string, baseDirOrPrefix: string | { readonly prefix: string }) =>
-  Layer.effect(ServerConfig, makeTest(cwd, baseDirOrPrefix));
+  Layer.effect(
+    ServerConfig,
+    makeTest(cwd, baseDirOrPrefix).pipe(
+      Effect.provideService(StatePermissions.StatePermissionEnforcer, {
+        ensurePathMode: (input) =>
+          input.createDirectory
+            ? FileSystem.FileSystem.pipe(
+                Effect.flatMap((fs) =>
+                  fs.makeDirectory(input.path, { recursive: true, mode: input.mode }),
+                ),
+              )
+            : Effect.void,
+      }),
+    ),
+  );
 
 export const resolveStaticDir = Effect.fn(function* () {
   const { join, resolve } = yield* Path.Path;

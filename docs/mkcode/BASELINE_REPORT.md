@@ -12,15 +12,19 @@ unverified.
 No full command logs were persisted. This report records commands, exit codes,
 relevant output, and classifications observed during the audit.
 
-## Source state
+## Audit source state
 
-- Branch: `main`
-- Commit: `ecb35f75839925dd1ac6f854efeef5c9e291d11b`
+- Fixed T3-derived baseline branch: `main`
+- Fixed T3-derived baseline commit: `ecb35f75839925dd1ac6f854efeef5c9e291d11b`
 - Remote tracking: `origin/main`
 - Initial and post-baseline `git status --short`: empty
 - Fork GitHub Actions baseline at audit time: none
-- Phase 1 local state: one validation-only workflow is defined; a remote Actions
-  run and branch-protection enforcement have not yet been observed
+- Phase 1 has since landed and an observed `main` Actions run passed;
+  branch-protection enforcement remains an owner-side repository setting.
+
+The minimal project-configuration phase began from branch `main` at
+`f728abd9c6dac016050a4c290da394faca3585ef`. Its working-tree changes were not
+committed by this task.
 
 ## Environment
 
@@ -73,6 +77,33 @@ The default and incomplete paths do not create the anonymous-identity file.
 
 No full command logs were persisted. Counts above are summaries of the terminal
 output from this verification run.
+
+## Minimal project-configuration phase verification
+
+The established validation sequence was repeated after adding
+`@mkcode/project-config`, the isolated server registry, and its RPC contracts:
+
+| Command                                                      |                          Exit | Result                                                                                                                                                                                                                                                                          |
+| ------------------------------------------------------------ | ----------------------------: | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm install --frozen-lockfile`                             |                             0 | All 17 workspace projects installed from the updated lockfile; root prepare succeeded.                                                                                                                                                                                          |
+| `pnpm exec vp check`                                         |                             0 | All 2,112 files formatted; 0 errors and the same 9 pre-existing React warnings. New inline-schema warnings were removed before the final run.                                                                                                                                   |
+| `pnpm exec vp run typecheck`                                 |                             0 | All 16 workspace tasks passed. The same three non-failing pre-existing Effect suggestions remained.                                                                                                                                                                             |
+| `pnpm exec vp run --filter @t3tools/desktop ensure:electron` |                             0 | Electron 41.5.0 runtime was present.                                                                                                                                                                                                                                            |
+| `pnpm exec vp run test`                                      |                             0 | All 15 workspace tasks passed: 587 test files passed, 2 skipped; 4,641 tests passed, 7 skipped.                                                                                                                                                                                 |
+| `pnpm run build`                                             |                             0 | All 5 root build tasks passed; existing bundle-size, sourcemap, plugin-timing, and dependency-bundling warnings remained non-failing.                                                                                                                                           |
+| `pnpm exec node scripts/release-smoke.ts`                    | 0 after one diagnosed failure | The first attempt failed because its explicit temporary-workspace manifest list omitted the new package. Adding `packages/project-config/package.json` to `scripts/release-smoke.ts` made the 17-project smoke fixture and all release mechanics pass. No publication occurred. |
+
+Focused evidence included 17 project parser/resolver tests, 8 server registry
+service tests, one project-registration contract serialization test, and one
+authenticated WebSocket registration/inspection integration test. These are
+included in the full totals above.
+
+The project configuration package has no child-process, Git mutation, worktree,
+provider, or UI dependency. Server registration reads the target repository and
+writes only the isolated server-state `project-registrations.json`. Invalid
+revalidation retains the last valid snapshot and records structured errors.
+
+No full command logs were persisted for this phase.
 
 ## Commands and results
 

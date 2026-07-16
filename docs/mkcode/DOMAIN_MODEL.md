@@ -1,8 +1,9 @@
 # Factory domain model
 
-This document defines the target factory domain. None of these records should be
-read as already implemented unless the current-architecture documentation says
-otherwise.
+This document defines the target factory domain. The current server now has a
+minimal local project registration and resolved configuration snapshot, but the
+factory `ProjectDefinition` record and every run/work item entity below remain
+planned unless explicitly stated otherwise.
 
 ## Domain boundary
 
@@ -53,6 +54,11 @@ erDiagram
 - **Snapshot:** active runs capture repository revision and resolved project
   configuration.
 - **Prohibited:** owning an interactive thread or storing provider credentials.
+- **Implemented precursor:** `apps/server/src/projectRegistry.ts` records the
+  stable project ID, canonical repository path, enabled state, validation
+  metadata, and last `ResolvedProjectConfiguration` in a server-owned JSON
+  store. It is control-plane registration metadata, not the future
+  factory-persistence ProjectDefinition aggregate.
 
 ### ConversationLink
 

@@ -16,12 +16,13 @@ without separate explicit direction.
 
 - **Phase 0:** implemented in the working tree; architecture documentation and
   repository guardrails are present.
-- **Phase 1:** implemented locally. Validation-only CI, telemetry opt-in policy,
+- **Phase 1:** implemented and published. Validation-only CI, telemetry opt-in policy,
   disabled inherited automation references, toolchain documentation, licensing
-  note, and compatibility inventory are present. A remote Actions run and branch
-  protection cannot be verified until these changes are published through the
-  owner's normal repository process.
-- **Phases 2–13:** not started.
+  note, and compatibility inventory are present. A remote `main` Actions run
+  passed; branch protection remains owner-configured.
+- **Phase 4:** implemented in this change as a deliberately minimal,
+  non-executing project configuration and server registration slice.
+- **Phases 2–3 and 5–13:** not started.
 
 ## Phase 0: Land the audit documentation
 
@@ -98,23 +99,26 @@ without separate explicit direction.
 - **Rollback:** re-enable the previous build/release selection; retain source and
   manifests until removal evidence is complete.
 
-## Phase 4: Add minimal project configuration
+## Phase 4: Add minimal project configuration — implemented
 
 - **Goal:** register one local repository and describe setup/validation safely.
-- **Prerequisites:** stable browser/server baseline and accepted v1alpha1 schema.
-- **Affected:** new project-config/factory-contract packages, file-based registry,
-  server project/config query APIs, one example `.mkcode/project.yaml`.
+- **Prerequisites:** stable browser/server baseline and accepted version 1 schema.
+- **Affected:** `packages/project-config`, project-registry contracts, isolated
+  server registration service/store, WebSocket RPC, example fixture, docs.
 - **Deliverables:** repository path registration; base branch; worktree root;
-  structured setup/validation commands; one ExecutionProfile; validation and
-  snapshot hashing.
-- **Verification:** valid, missing, malformed, unknown-key, unsupported-version,
-  path-escape, missing-reference, and secret-reference cases.
+  structured setup/validation command descriptions; opaque default
+  ExecutionProfile reference; validation and snapshot hashing.
+- **Verification:** package and server tests cover valid, missing, malformed,
+  unknown-key, unsupported-version, duplicate ID, invalid type/timeout,
+  path/symlink escape, repository/Git checks, revalidation, disable/enable,
+  persistence reload, safe serialization, and an authenticated WebSocket flow.
 - **Risks:** arbitrary shell execution, secrets in snapshots, mutable config
   affecting active work, duplicated current interactive project semantics.
 - **Exclusions:** running workflows, browser CRUD, database migration, broad
   registry design.
-- **Rollback:** remove the experimental registry/API behind a feature flag; file
-  configuration remains inert.
+- **Rollback:** remove the `projectRegistry.*` RPC methods, service layer, and
+  package consumers; preserve or archive `project-registrations.json` for
+  operator recovery. Checked-in project configuration remains inert.
 
 ## Phase 5: Add a minimal durable factory-worker skeleton
 

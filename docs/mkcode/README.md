@@ -8,18 +8,25 @@ components already exist.
 
 ## Current status
 
-The fixed starting baseline is `main` at
+The fixed upstream-derived starting baseline is
 `ecb35f75839925dd1ac6f854efeef5c9e291d11b`. The existing browser, server,
 provider adapters, interactive orchestration, SQLite persistence, Git/worktree
 support, local authentication, and Tailscale support are operational. The
-factory worker, workflow engine, factory database, registries, and Herdr, Linear,
-and workflow-oriented GitHub adapters are planned components.
+factory worker, workflow engine, factory database, agent/team/workflow/profile
+registries, and Herdr, Linear, and workflow-oriented GitHub adapters are planned
+components.
 
-Phase 1 fork-safety controls are implemented locally: one validation-only active
+Phase 1 fork-safety controls are implemented: one validation-only active
 CI workflow, telemetry disabled by default, inherited publishing/deployment/
 community workflows retained outside GitHub's active workflow directory, and
 explicit toolchain, licensing, and persisted-identifier guidance. A remote
-Actions run and branch-protection enforcement remain owner-side verification.
+Actions run has passed on `main`; branch-protection enforcement remains an
+owner-side repository setting.
+
+Minimal project configuration and local project registration are now
+implemented. The server can validate a checked-in `.mkcode/project.yaml`, store
+an isolated local registration, and expose browser-safe `projectRegistry.*`
+contracts. It cannot execute those commands or start a workflow.
 
 MK Code does not seek full T3 Code feature parity. Desktop, mobile, marketing,
 T3 Connect, relay infrastructure, and public T3 distribution remain present
@@ -50,6 +57,7 @@ Architecture decisions:
 - [0003: Separate factory worker](DECISIONS/0003-separate-factory-worker.md)
 - [0004: Provider-neutral agent definitions](DECISIONS/0004-provider-neutral-agent-definitions.md)
 - [0005: Herdr as a process host](DECISIONS/0005-herdr-as-process-host.md)
+- [0006: Server-owned project registration store](DECISIONS/0006-project-registration-store.md)
 
 ## Terminology
 

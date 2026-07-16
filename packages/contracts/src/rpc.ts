@@ -79,6 +79,13 @@ import {
   ProjectWriteFileResult,
 } from "./project.ts";
 import {
+  ProjectRegisterInput,
+  ProjectRegistration,
+  ProjectRegistrationError,
+  ProjectRegistrationList,
+  ProjectRegistryProjectInput,
+} from "./projectRegistry.ts";
+import {
   TerminalAttachInput,
   TerminalAttachStreamEvent,
   TerminalClearInput,
@@ -145,6 +152,15 @@ import {
 import { VcsError } from "./vcs.ts";
 
 export const WS_METHODS = {
+  // MK Code registered project configuration methods. These are intentionally
+  // separate from the inherited interactive workspace `projects.*` surface.
+  projectRegistryRegister: "projectRegistry.register",
+  projectRegistryList: "projectRegistry.list",
+  projectRegistryRead: "projectRegistry.read",
+  projectRegistryValidate: "projectRegistry.validate",
+  projectRegistryDisable: "projectRegistry.disable",
+  projectRegistryEnable: "projectRegistry.enable",
+
   // Project registry methods
   projectsList: "projects.list",
   projectsAdd: "projects.add",
@@ -233,6 +249,42 @@ export const WS_METHODS = {
   subscribeServerLifecycle: "subscribeServerLifecycle",
   subscribeAuthAccess: "subscribeAuthAccess",
 } as const;
+
+export const WsProjectRegistryRegisterRpc = Rpc.make(WS_METHODS.projectRegistryRegister, {
+  payload: ProjectRegisterInput,
+  success: ProjectRegistration,
+  error: Schema.Union([ProjectRegistrationError, EnvironmentAuthorizationError]),
+});
+
+export const WsProjectRegistryListRpc = Rpc.make(WS_METHODS.projectRegistryList, {
+  payload: Schema.Struct({}),
+  success: ProjectRegistrationList,
+  error: Schema.Union([ProjectRegistrationError, EnvironmentAuthorizationError]),
+});
+
+export const WsProjectRegistryReadRpc = Rpc.make(WS_METHODS.projectRegistryRead, {
+  payload: ProjectRegistryProjectInput,
+  success: ProjectRegistration,
+  error: Schema.Union([ProjectRegistrationError, EnvironmentAuthorizationError]),
+});
+
+export const WsProjectRegistryValidateRpc = Rpc.make(WS_METHODS.projectRegistryValidate, {
+  payload: ProjectRegistryProjectInput,
+  success: ProjectRegistration,
+  error: Schema.Union([ProjectRegistrationError, EnvironmentAuthorizationError]),
+});
+
+export const WsProjectRegistryDisableRpc = Rpc.make(WS_METHODS.projectRegistryDisable, {
+  payload: ProjectRegistryProjectInput,
+  success: ProjectRegistration,
+  error: Schema.Union([ProjectRegistrationError, EnvironmentAuthorizationError]),
+});
+
+export const WsProjectRegistryEnableRpc = Rpc.make(WS_METHODS.projectRegistryEnable, {
+  payload: ProjectRegistryProjectInput,
+  success: ProjectRegistration,
+  error: Schema.Union([ProjectRegistrationError, EnvironmentAuthorizationError]),
+});
 
 export const WsServerUpsertKeybindingRpc = Rpc.make(WS_METHODS.serverUpsertKeybinding, {
   payload: ServerUpsertKeybindingInput,
@@ -682,6 +734,12 @@ export const WsSubscribeAuthAccessRpc = Rpc.make(WS_METHODS.subscribeAuthAccess,
 });
 
 export const WsRpcGroup = RpcGroup.make(
+  WsProjectRegistryRegisterRpc,
+  WsProjectRegistryListRpc,
+  WsProjectRegistryReadRpc,
+  WsProjectRegistryValidateRpc,
+  WsProjectRegistryDisableRpc,
+  WsProjectRegistryEnableRpc,
   WsServerGetConfigRpc,
   WsServerRefreshProvidersRpc,
   WsServerUpdateProviderRpc,

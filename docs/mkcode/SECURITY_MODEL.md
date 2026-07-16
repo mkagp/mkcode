@@ -44,6 +44,40 @@ separately reviewed authentication and authorization model is implemented.
 - Runtime processes and deterministic commands receive only required secret
   references and environment values.
 
+## Implemented project-configuration boundary
+
+Local registration accepts an absolute repository path only through an
+authenticated operate-scoped server RPC. The server canonicalizes it, verifies
+an existing directory and Git marker, and reads only the fixed
+`.mkcode/project.yaml` location. Checked-in configuration cannot nominate an
+absolute repository root.
+
+The parser rejects unknown keys, scalar command strings, empty executables,
+invalid timeouts, traversal/absolute working and context paths, and symlink
+escapes for existing paths. Environment entries are variable-name references;
+the parser never reads the corresponding process environment. Registration
+stores no resolved secret values and performs no command, Git, worktree, or
+repository write operation.
+
+On Linux, the server explicitly applies mode `0700` to each server-owned state
+directory and mode `0600` to the project-registration store and its atomic-write
+temporary file. Existing broader registration-file permissions are narrowed on
+read or rewrite when the server can do so as the current owner. Linux directory
+creation and permission correction traverse path components through pinned
+`/proc/self/fd` descriptors, reject symbolic-link components, and stop before
+creating descendants outside managed state. The helper never recursively
+changes registered repositories or unrelated directories. This assumes procfs
+is mounted and is host hardening, not a portable access-control abstraction;
+non-Linux behavior has not received equivalent verification.
+
+Artifact and worktree paths may not exist at validation time. The resolver
+canonicalizes their deepest existing ancestor and rejects escapes and invalid
+ancestor types, but a future command/workspace implementation must repeat
+canonical parent/final-path checks at the moment of creation or use. Structured
+commands can still explicitly name a shell or dangerous executable, so the
+future runner must enforce executable, argument, network, credential, output,
+and cancellation policy. The parser is not a security sandbox.
+
 ## Secrets and redaction
 
 - Store secret values outside version-controlled project and registry files.
