@@ -48,8 +48,10 @@ The implemented deterministic runner (`packages/command-runner`) invokes the
 snapshotted executable and argument array directly with `shell:false`. Its base
 environment allowlist is `PATH`, `HOME`, `TMPDIR`, `TMP`, `TEMP`, `LANG`,
 `LC_ALL`, and `LC_CTYPE`; declared environment references add only their target
-names. `MKCODE_FACTORY_TOKEN` is neither inherited nor permitted as a declared
-source. Resolved values are held in memory for launch and redaction only.
+names. `MKCODE_FACTORY_TOKEN` is always added to the runner's protected-source
+set, including when a caller supplies additional protected sources; it is
+neither inherited nor permitted as a declared source. Resolved values are held
+in memory for launch and redaction only.
 
 Working directories are relative to the snapshotted repository execution root,
 checked lexically and by realpath, and checked again immediately before spawn.

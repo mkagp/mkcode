@@ -237,6 +237,9 @@ export function createFactoryApiServer(input: {
           if (cause instanceof TypeError) {
             throw new WorkflowEngineError("invalid_request", cause.message);
           }
+          if ((cause as NodeJS.ErrnoException).code === "ENOENT") {
+            throw new WorkflowEngineError("not_found", "Command output is not available.");
+          }
           throw cause;
         }
         json(response, 200, {

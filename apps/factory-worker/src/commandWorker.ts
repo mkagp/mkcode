@@ -44,6 +44,7 @@ export class CommandExecutionWorker {
   }
 
   async runClaimed(claimed: ClaimedJob): Promise<void> {
+    if (this.#stopping) return;
     if (claimed.job.jobType !== "command.execute") {
       throw new TypeError("Command worker received a non-command job.");
     }

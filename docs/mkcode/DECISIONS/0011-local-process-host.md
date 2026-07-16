@@ -13,8 +13,10 @@ APIs.
 `packages/command-runner` defines a narrow ProcessHost and implements only
 LocalProcessHost. It uses direct spawn with `shell:false`; Linux children start
 in a distinct process group so timeout/cancellation can interrupt and then kill
-descendants. Durable records use a generated process-host execution ID. Native
-PID is host-specific metadata and is never sufficient proof after restart.
+members that remain in that process group. Daemonized descendants or children
+that create a new session are outside that guarantee. Durable records use a
+generated process-host execution ID. Native PID is host-specific metadata and
+is never sufficient proof after restart.
 
 ## Consequences
 

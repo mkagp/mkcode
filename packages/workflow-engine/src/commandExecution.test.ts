@@ -120,6 +120,30 @@ describe("durable command execution", () => {
     } as const;
     NodeAssert.throws(() => engine.startCommand({ ...startInput, attemptId: otherAttempt.id }));
     const starting = engine.startCommand({ ...startInput, attemptId: claimed.attempt.id });
+    NodeAssert.throws(() =>
+      engine.markCommandRunning({
+        commandRunId: pending.id,
+        expectedVersion: starting.version,
+        processHostExecutionId: "execution-1",
+        processHostType: "other-host",
+        nativePid: 1234,
+        startedAt: "2026-07-16T00:00:00.000Z",
+        timeoutDeadline: "2026-07-16T00:00:30.000Z",
+        workingDirectory: root,
+      }),
+    );
+    NodeAssert.throws(() =>
+      engine.markCommandRunning({
+        commandRunId: pending.id,
+        expectedVersion: starting.version,
+        processHostExecutionId: "execution-1",
+        processHostType: "local",
+        nativePid: 1234,
+        startedAt: "2026-07-16T00:00:00.000Z",
+        timeoutDeadline: "2026-07-16T00:00:30.000Z",
+        workingDirectory: NodePath.join(root, "other"),
+      }),
+    );
     const running = engine.markCommandRunning({
       commandRunId: pending.id,
       expectedVersion: starting.version,
@@ -151,6 +175,7 @@ describe("durable command execution", () => {
 
     NodeAssert.equal(detail.workflowRun.status, "human_review");
     NodeAssert.equal(detail.commands[0]?.outcome, "passed");
+    NodeAssert.equal(detail.commands[0]?.terminatingSignal, null);
     NodeAssert.equal(detail.approvals[0]?.status, "pending");
     NodeAssert.ok(
       engine
@@ -304,6 +329,31 @@ describe("durable command execution", () => {
         nativePid: 4321,
       }),
     );
+    NodeAssert.throws(() =>
+      engine.recordCancelledCommandResult(pending.id, {
+        ...cancelledResult,
+        workingDirectory: NodePath.join(root, "other"),
+      }),
+    );
+    engine.close();
+  });
+
+  it("terminalizes the linked command when a claimed command job cannot be decoded", async () => {
+    const root = await makeRoot();
+    const engine = await WorkflowEngine.open({ stateDirectory: NodePath.join(root, "state") });
+    const created = createCommandWorkflow(engine, root);
+    const claimed = claimValidation(engine);
+    engine.failJob({
+      jobId: claimed.job.id,
+      leaseOwner: "worker-a",
+      retryable: false,
+      failureSummary: "The snapshotted project check is invalid.",
+      expectedStageVersion: claimed.stageVersion,
+    });
+    const detail = engine.readWorkflow(created.workflowRun.id);
+    NodeAssert.equal(detail.workflowRun.status, "failed");
+    NodeAssert.equal(detail.commands[0]?.status, "spawn_failed");
+    NodeAssert.equal(detail.commands[0]?.failureClassification, "invalid_command_snapshot");
     engine.close();
   });
 

@@ -208,10 +208,12 @@ export class WorkflowEngine {
     try {
       database.exec("PRAGMA foreign_keys = ON;");
       database.exec("PRAGMA journal_mode = WAL;");
-      const currentVersion = Number(
-        (database.prepare("PRAGMA user_version").get() as { user_version?: number }).user_version ??
-          0,
-      );
+      const readSchemaVersion = () =>
+        Number(
+          (database.prepare("PRAGMA user_version").get() as { user_version?: number })
+            .user_version ?? 0,
+        );
+      let currentVersion = readSchemaVersion();
       if (currentVersion > FACTORY_SCHEMA_VERSION) {
         throw new WorkflowEngineError(
           "unsupported_schema",
@@ -219,28 +221,31 @@ export class WorkflowEngine {
           { currentVersion, supportedVersion: FACTORY_SCHEMA_VERSION },
         );
       }
-      if (currentVersion < 1) {
+      const applyMigration = (targetVersion: number, sql: string): void => {
+        if (currentVersion >= targetVersion) return;
         database.exec("BEGIN EXCLUSIVE;");
         try {
-          database.exec(migration001Sql);
-          database.exec("PRAGMA user_version = 1;");
+          const lockedVersion = readSchemaVersion();
+          if (lockedVersion > FACTORY_SCHEMA_VERSION) {
+            throw new WorkflowEngineError(
+              "unsupported_schema",
+              `Factory schema ${lockedVersion} is newer than supported schema ${FACTORY_SCHEMA_VERSION}.`,
+              { currentVersion: lockedVersion, supportedVersion: FACTORY_SCHEMA_VERSION },
+            );
+          }
+          if (lockedVersion < targetVersion) {
+            database.exec(sql);
+            database.exec(`PRAGMA user_version = ${targetVersion};`);
+          }
           database.exec("COMMIT;");
+          currentVersion = Math.max(lockedVersion, targetVersion);
         } catch (cause) {
           database.exec("ROLLBACK;");
           throw cause;
         }
-      }
-      if (currentVersion < 2) {
-        database.exec("BEGIN EXCLUSIVE;");
-        try {
-          database.exec(migration002Sql);
-          database.exec("PRAGMA user_version = 2;");
-          database.exec("COMMIT;");
-        } catch (cause) {
-          database.exec("ROLLBACK;");
-          throw cause;
-        }
-      }
+      };
+      applyMigration(1, migration001Sql);
+      applyMigration(2, migration002Sql);
       await ensurePrivateFile(databasePath, false);
       await ensurePrivateFile(`${databasePath}-wal`, false);
       await ensurePrivateFile(`${databasePath}-shm`, false);
@@ -930,24 +935,21 @@ export class WorkflowEngine {
           "The command is no longer awaiting process launch confirmation.",
         );
       }
-      if (command.processHostExecutionId !== input.processHostExecutionId) {
+      if (
+        command.processHostExecutionId !== input.processHostExecutionId ||
+        command.processHostType !== input.processHostType ||
+        command.resolvedWorkingDirectory !== input.workingDirectory
+      ) {
         throw new WorkflowEngineError("conflict", "Process-host launch identity does not match.");
       }
       this.#database
         .prepare(
           `UPDATE command_runs
-           SET status = 'running', process_host_type = ?, native_pid = ?, started_at = ?,
-               timeout_deadline = ?, resolved_working_directory = ?, version = version + 1
+           SET status = 'running', native_pid = ?, started_at = ?, timeout_deadline = ?,
+               version = version + 1
            WHERE id = ?`,
         )
-        .run(
-          input.processHostType,
-          input.nativePid ?? null,
-          input.startedAt,
-          input.timeoutDeadline,
-          input.workingDirectory,
-          command.id,
-        );
+        .run(input.nativePid ?? null, input.startedAt, input.timeoutDeadline, command.id);
       this.#insertEvent(command.workflowRunId, "command.started", {
         commandRunId: command.id,
         processHostType: input.processHostType,
@@ -1041,9 +1043,7 @@ export class WorkflowEngine {
            SET status = ?, completed_at = ?, started_at = COALESCE(started_at, ?),
                timeout_deadline = COALESCE(timeout_deadline, ?), exit_code = ?,
                terminating_signal = ?, timed_out = ?, cancelled = ?,
-               process_host_type = ?, process_host_execution_id = ?, native_pid = ?,
-               resolved_working_directory = ?, stdout_artifact_reference = ?,
-               stderr_artifact_reference = ?, stdout_digest = ?, stderr_digest = ?,
+               stdout_digest = ?, stderr_digest = ?,
                stdout_observed_bytes = ?, stderr_observed_bytes = ?,
                stdout_persisted_bytes = ?, stderr_persisted_bytes = ?,
                stdout_truncated = ?, stderr_truncated = ?, redaction_metadata_json = ?,
@@ -1060,12 +1060,6 @@ export class WorkflowEngine {
           input.result.signal,
           input.result.timedOut ? 1 : 0,
           input.result.cancelled ? 1 : 0,
-          input.result.processHostType,
-          input.result.executionId,
-          input.result.nativePid ?? null,
-          input.result.workingDirectory,
-          input.result.stdout.locationReference,
-          input.result.stderr.locationReference,
           input.result.stdout.digest,
           input.result.stderr.digest,
           input.result.stdout.observedBytes,
@@ -1326,8 +1320,12 @@ export class WorkflowEngine {
         );
       }
       if (
-        command.processHostExecutionId !== undefined &&
-        command.processHostExecutionId !== result.executionId
+        command.processHostExecutionId !== result.executionId ||
+        command.processHostType !== result.processHostType ||
+        command.resolvedWorkingDirectory !== result.workingDirectory ||
+        command.stdoutArtifactReference !== result.stdout.locationReference ||
+        command.stderrArtifactReference !== result.stderr.locationReference ||
+        (command.nativePid !== undefined && command.nativePid !== result.nativePid)
       ) {
         throw new WorkflowEngineError(
           "conflict",
@@ -1351,9 +1349,7 @@ export class WorkflowEngine {
         .prepare(
           `UPDATE command_runs SET completed_at = ?, started_at = COALESCE(started_at, ?),
            timeout_deadline = COALESCE(timeout_deadline, ?), exit_code = ?,
-           terminating_signal = ?, process_host_type = ?, process_host_execution_id = ?,
-           native_pid = ?, resolved_working_directory = ?, stdout_artifact_reference = ?,
-           stderr_artifact_reference = ?, stdout_digest = ?, stderr_digest = ?,
+           terminating_signal = ?, stdout_digest = ?, stderr_digest = ?,
            stdout_observed_bytes = ?, stderr_observed_bytes = ?,
            stdout_persisted_bytes = ?, stderr_persisted_bytes = ?,
            stdout_truncated = ?, stderr_truncated = ?, redaction_metadata_json = ?,
@@ -1365,12 +1361,6 @@ export class WorkflowEngine {
           result.timeoutDeadline ?? null,
           result.exitCode,
           result.signal,
-          result.processHostType,
-          result.executionId,
-          result.nativePid ?? null,
-          result.workingDirectory,
-          result.stdout.locationReference,
-          result.stderr.locationReference,
           result.stdout.digest,
           result.stderr.digest,
           result.stdout.observedBytes,
@@ -1506,6 +1496,26 @@ export class WorkflowEngine {
           failureSummary: input.failureSummary,
         });
       } else {
+        if (job.jobType === "command.execute") {
+          const command = this.#database
+            .prepare("SELECT id FROM command_runs WHERE stage_run_id = ?")
+            .get(job.stageRunId) as SqlRow | undefined;
+          if (command) {
+            const commandId = asString(command, "id");
+            this.#database
+              .prepare(
+                `UPDATE command_runs SET status = 'spawn_failed', outcome = 'spawn_failed',
+                 completed_at = ?, failure_classification = 'invalid_command_snapshot',
+                 version = version + 1 WHERE id = ? AND status = 'pending'`,
+              )
+              .run(now, commandId);
+            this.#insertEvent(job.workflowRunId, "command.failed", {
+              commandRunId: commandId,
+              outcome: "spawn_failed",
+              failureClassification: "invalid_command_snapshot",
+            });
+          }
+        }
         this.#database
           .prepare(
             `UPDATE job_intents
@@ -2330,10 +2340,10 @@ export class WorkflowEngine {
     ...(optionalString(row, "timeout_deadline")
       ? { timeoutDeadline: optionalString(row, "timeout_deadline") }
       : {}),
-    ...(row.exit_code === null || row.exit_code === undefined
+    ...(row.completion_digest === null || row.completion_digest === undefined
       ? {}
       : { exitCode: optionalNumber(row, "exit_code") ?? null }),
-    ...(row.terminating_signal === null || row.terminating_signal === undefined
+    ...(row.completion_digest === null || row.completion_digest === undefined
       ? {}
       : { terminatingSignal: optionalString(row, "terminating_signal") ?? null }),
     timedOut: asNumber(row, "timed_out") === 1,

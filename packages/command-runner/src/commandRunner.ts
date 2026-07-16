@@ -123,8 +123,10 @@ export class DeterministicCommandRunner {
         : { maximumBytesPerStream: input.maximumOutputBytesPerStream }),
     });
     this.#environment = input.environment ?? process.env;
-    this.#protectedEnvironmentSources =
-      input.protectedEnvironmentSources ?? new Set(["MKCODE_FACTORY_TOKEN"]);
+    this.#protectedEnvironmentSources = new Set([
+      "MKCODE_FACTORY_TOKEN",
+      ...(input.protectedEnvironmentSources ?? []),
+    ]);
     this.#redactionValues = input.redactionValues ?? [];
     this.#terminationGraceMilliseconds =
       input.terminationGraceMilliseconds ?? DEFAULT_TERMINATION_GRACE_MILLISECONDS;
@@ -179,10 +181,15 @@ export class DeterministicCommandRunner {
       ...this.#redactionValues,
     ]);
     const completedAt = () => new Date().toISOString();
-    const closeArtifacts = async () => ({
-      stdout: await capture.stdout.close(),
-      stderr: await capture.stderr.close(),
-    });
+    const closeArtifacts = async () => {
+      const [stdout, stderr] = await Promise.allSettled([
+        capture.stdout.close(),
+        capture.stderr.close(),
+      ]);
+      if (stdout.status === "rejected") throw stdout.reason;
+      if (stderr.status === "rejected") throw stderr.reason;
+      return { stdout: stdout.value, stderr: stderr.value };
+    };
     if (input.signal?.aborted) {
       const artifacts = await closeArtifacts();
       return {
@@ -202,6 +209,7 @@ export class DeterministicCommandRunner {
     }
 
     let hosted;
+    let launchedWorkingDirectory = workingDirectory;
     try {
       // Re-resolve immediately before spawn to narrow the path replacement window.
       const immediate = await canonicalDirectory(root, input.definition.workingDirectory);
@@ -212,6 +220,7 @@ export class DeterministicCommandRunner {
         workingDirectory: immediate.workingDirectory,
         environment,
       });
+      launchedWorkingDirectory = immediate.workingDirectory;
     } catch (cause) {
       const artifacts = await closeArtifacts();
       return {
@@ -259,15 +268,17 @@ export class DeterministicCommandRunner {
           ...(hosted.nativePid === undefined ? {} : { nativePid: hosted.nativePid }),
           startedAt: startedAt.toISOString(),
           timeoutDeadline,
-          workingDirectory,
+          workingDirectory: launchedWorkingDirectory,
         }),
       )
       .then(
         () => ({ kind: "started" as const }),
         (cause: unknown) => ({ kind: "start_failed" as const, cause }),
       );
+    const processCompletion = hosted.completion.then((exit) => ({ kind: "exit" as const, exit }));
     const startGate = await Promise.race([
       started,
+      processCompletion,
       control.then((reason) => ({ kind: "control" as const, reason })),
     ]);
     if (startGate.kind === "start_failed") {
@@ -286,13 +297,26 @@ export class DeterministicCommandRunner {
       throw startGate.cause;
     }
 
-    const first =
-      startGate.kind === "control"
-        ? startGate
-        : await Promise.race([
-            hosted.completion.then((exit) => ({ kind: "exit" as const, exit })),
-            control.then((reason) => ({ kind: "control" as const, reason })),
-          ]);
+    let first:
+      | { readonly kind: "exit"; readonly exit: ProcessExit }
+      | { readonly kind: "control"; readonly reason: "timed_out" | "cancelled" };
+    if (startGate.kind === "exit") {
+      const persistedStart = await started;
+      if (persistedStart.kind === "start_failed") {
+        if (timeout) NodeTimers.clearTimeout(timeout);
+        removeAbort();
+        await closeArtifacts();
+        throw persistedStart.cause;
+      }
+      first = startGate;
+    } else if (startGate.kind === "control") {
+      first = startGate;
+    } else {
+      first = await Promise.race([
+        processCompletion,
+        control.then((reason) => ({ kind: "control" as const, reason })),
+      ]);
+    }
 
     let exit: ProcessExit;
     let forcedOutcome: "timed_out" | "cancelled" | undefined;
@@ -321,7 +345,7 @@ export class DeterministicCommandRunner {
     return {
       outcome,
       executionId,
-      workingDirectory,
+      workingDirectory: launchedWorkingDirectory,
       processHostType: this.#host.type,
       ...(hosted.nativePid === undefined ? {} : { nativePid: hosted.nativePid }),
       startedAt: startedAt.toISOString(),

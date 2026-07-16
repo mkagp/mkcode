@@ -59,6 +59,21 @@ describe("StreamingRedactor", () => {
     expect(output).not.toContain("abcdefghijklmnopqrstuvwxyz");
   });
 
+  it("redacts the complete bearer-token alphabet without leaking a suffix", () => {
+    const redactor = new StreamingRedactor([]);
+    const output =
+      redactor.push(Buffer.from("Bearer abcdefghijklmnop/+= next")) + redactor.finish();
+    expect(output).toBe("[REDACTED] next");
+  });
+
+  it("does not split surrogate pairs at the streaming carry boundary", () => {
+    const source = `a🙂${"x".repeat(511)}`;
+    const redactor = new StreamingRedactor([]);
+    const output = redactor.push(Buffer.from(source)) + redactor.finish();
+    expect(output).toBe(source);
+    expect(output).not.toContain("�");
+  });
+
   it("suppresses pattern tokens longer than the streaming carry window", () => {
     const token = "a".repeat(2_048);
     const redactor = new StreamingRedactor([]);
@@ -224,6 +239,27 @@ describe("DeterministicCommandRunner", () => {
     ).rejects.toThrow("protected");
   });
 
+  it("always protects the worker credential when callers add protected sources", async () => {
+    const root = await temporaryRoot();
+    const runner = new DeterministicCommandRunner({
+      stateRoot: NodePath.join(root, "state"),
+      environment: {
+        PATH: NodeProcess.env.PATH,
+        MKCODE_FACTORY_TOKEN: "protected",
+        OTHER_PROTECTED: "also-protected",
+      },
+      protectedEnvironmentSources: new Set(["OTHER_PROTECTED"]),
+    });
+    for (const source of ["MKCODE_FACTORY_TOKEN", "OTHER_PROTECTED"]) {
+      await expect(
+        runner.execute({
+          definition: definition({ environment: [{ name: "PROJECT_TOKEN", source }] }),
+          executionRoot: root,
+        }),
+      ).rejects.toThrow("protected");
+    }
+  });
+
   it("rejects a symlink working-directory escape", async () => {
     const root = await temporaryRoot();
     const outside = await temporaryRoot();
@@ -325,6 +361,18 @@ describe("DeterministicCommandRunner", () => {
     NodeTimers.clearTimeout(timer);
   });
 
+  it("preserves a fast process exit while launch persistence finishes", async () => {
+    const root = await temporaryRoot();
+    const runner = new DeterministicCommandRunner({ stateRoot: NodePath.join(root, "state") });
+    const result = await runner.execute({
+      definition: definition({ args: ["-e", "process.exit(0)"], timeoutSeconds: 1 }),
+      executionRoot: root,
+      onStarted: () => new Promise((resolve) => NodeTimers.setTimeout(resolve, 1_100)),
+    });
+    expect(result.outcome).toBe("passed");
+    expect(result.timedOut).toBe(false);
+  });
+
   it("bounds output and marks truncation", async () => {
     const root = await temporaryRoot();
     const runner = new DeterministicCommandRunner({
@@ -339,6 +387,21 @@ describe("DeterministicCommandRunner", () => {
     });
     expect(result.stdout.persistedBytes).toBe(16);
     expect(result.stdout.truncated).toBe(true);
+  });
+
+  it("truncates output only at complete UTF-8 code-point boundaries", async () => {
+    const root = await temporaryRoot();
+    const store = new CommandOutputStore({
+      stateRoot: NodePath.join(root, "state"),
+      maximumBytesPerStream: 4,
+    });
+    const capture = await store.createCapture("utf8-truncation", []);
+    capture.stdout.write(Buffer.from("abc🙂"));
+    const artifact = await capture.stdout.close();
+    await capture.stderr.close();
+    const page = await store.readPage({ locationReference: artifact.locationReference });
+    expect(page).toEqual({ data: "abc", nextCursor: 3, end: true });
+    expect(artifact).toMatchObject({ persistedBytes: 3, truncated: true });
   });
 
   it("does not persist a secret when truncation falls near its boundary", async () => {
@@ -390,6 +453,23 @@ describe("CommandOutputStore", () => {
     await expect(store.createCapture("execution-1", [])).rejects.toThrow("real directory");
     await expect(store.readPage({ locationReference: "../outside-secret" })).rejects.toThrow(
       "escapes",
+    );
+  });
+
+  it("rejects reads after the state root is replaced by a symlink", async () => {
+    if (NodeProcess.platform === "win32") return;
+    const root = await temporaryRoot();
+    const state = NodePath.join(root, "state");
+    const movedState = NodePath.join(root, "moved-state");
+    const store = new CommandOutputStore({ stateRoot: state });
+    const capture = await store.createCapture("execution-1", []);
+    capture.stdout.write(Buffer.from("private"));
+    const artifact = await capture.stdout.close();
+    await capture.stderr.close();
+    await NodeFSP.rename(state, movedState);
+    await NodeFSP.symlink(movedState, state);
+    await expect(store.readPage({ locationReference: artifact.locationReference })).rejects.toThrow(
+      "unsafe",
     );
   });
 });

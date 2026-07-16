@@ -363,6 +363,14 @@ describe("factory worker API", () => {
         `/v1/commands/${command.id}/output?stream=stdout`,
       );
       NodeAssert.equal(recoveredOutput.body.data, output.body.data);
+      NodeAssert.ok(command.stderrArtifactReference);
+      await NodeFSP.rm(NodePath.join(stateDirectory, command.stderrArtifactReference));
+      const missingOutput = await api<{ code: string }>(
+        worker,
+        `/v1/commands/${command.id}/output?stream=stderr`,
+      );
+      NodeAssert.equal(missingOutput.status, 404);
+      NodeAssert.equal(missingOutput.body.code, "not_found");
       const events = await api<{ events: ReadonlyArray<{ eventType: string }> }>(
         worker,
         `/v1/events?runId=${created.body.workflowRun.id}`,

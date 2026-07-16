@@ -3,6 +3,7 @@ import * as NodeCrypto from "node:crypto";
 import * as NodeFS from "node:fs";
 import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
+import * as NodeProcess from "node:process";
 
 import { StreamingRedactor } from "./redactor.ts";
 
@@ -149,9 +150,12 @@ export class CommandOutputStore {
       );
     }
     const executionDirectory = NodePath.join(this.outputRoot, executionId);
+    const stateRootStat = await NodeFSP.lstat(this.stateRoot);
     const outputRootStat = await NodeFSP.lstat(this.outputRoot);
     const executionDirectoryStat = await NodeFSP.lstat(executionDirectory);
     if (
+      !stateRootStat.isDirectory() ||
+      stateRootStat.isSymbolicLink() ||
       !outputRootStat.isDirectory() ||
       outputRootStat.isSymbolicLink() ||
       !executionDirectoryStat.isDirectory() ||
@@ -159,11 +163,29 @@ export class CommandOutputStore {
     ) {
       throw new TypeError("Output artifact directory is unsafe.");
     }
-    const absolute = NodePath.join(executionDirectory, filename);
-    const handle = await NodeFSP.open(
-      absolute,
-      NodeFS.constants.O_RDONLY | (NodeFS.constants.O_NOFOLLOW ?? 0),
+    const directoryHandle = await NodeFSP.open(
+      executionDirectory,
+      NodeFS.constants.O_RDONLY |
+        (NodeFS.constants.O_DIRECTORY ?? 0) |
+        (NodeFS.constants.O_NOFOLLOW ?? 0),
     );
+    let handle: NodeFSP.FileHandle;
+    try {
+      const directoryHandleStat = await directoryHandle.stat();
+      if (!directoryHandleStat.isDirectory()) {
+        throw new TypeError("Output artifact directory is unsafe.");
+      }
+      const absolute =
+        NodeProcess.platform === "linux"
+          ? `/proc/self/fd/${directoryHandle.fd}/${filename}`
+          : NodePath.join(executionDirectory, filename);
+      handle = await NodeFSP.open(
+        absolute,
+        NodeFS.constants.O_RDONLY | (NodeFS.constants.O_NOFOLLOW ?? 0),
+      );
+    } finally {
+      await directoryHandle.close();
+    }
     try {
       const stat = await handle.stat();
       if (!stat.isFile()) throw new TypeError("Output artifact is not a regular file.");
@@ -204,21 +226,28 @@ export class CommandOutputStore {
     let result: OutputArtifact | undefined;
     let closeFailure: { readonly cause: unknown } | undefined;
     const persist = (text: string): void => {
-      if (text.length === 0) return;
+      if (text.length === 0 || truncated) return;
       const buffer = Buffer.from(text, "utf8");
       const remaining = this.#maximumBytesPerStream - persistedBytes;
       if (remaining <= 0) {
         truncated = true;
         return;
       }
-      const output = buffer.subarray(0, remaining);
+      const candidate = buffer.subarray(0, remaining);
+      const output = candidate.subarray(0, completeUtf8ByteLength(candidate));
       if (output.length < buffer.length) truncated = true;
+      if (output.length === 0) return;
       persistedBytes += output.length;
       digest.update(output);
       queue = queue.then(async () => {
         if (writeError !== undefined) return;
         try {
-          await handle.write(output);
+          let offset = 0;
+          while (offset < output.length) {
+            const { bytesWritten } = await handle.write(output, offset, output.length - offset);
+            if (bytesWritten < 1) throw new Error("Command output write made no progress.");
+            offset += bytesWritten;
+          }
         } catch (cause) {
           writeError = cause;
         }

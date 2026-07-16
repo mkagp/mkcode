@@ -6,7 +6,7 @@ const PATTERN_CARRY_LENGTH = 512;
 const TOKEN_CHARACTER = /^[A-Za-z0-9._~+/=-]$/u;
 
 const sensitivePatterns = [
-  /\bBearer\s+[A-Za-z0-9._~+/=-]{8,}\b/giu,
+  /\bBearer\s+[A-Za-z0-9._~+/=-]{8,}(?![A-Za-z0-9._~+/=-])/giu,
   /\bgh(?:p|o|u|s|r)_[A-Za-z0-9_]{20,}\b/gu,
   /\bgithub_pat_[A-Za-z0-9_]{20,}\b/gu,
   /\b(?:api[_-]?key|token|secret)\s*[:=]\s*['"]?[A-Za-z0-9._~+/=-]{8,}['"]?/giu,
@@ -86,6 +86,16 @@ export class StreamingRedactor {
         const end = start + match[0].length;
         if (start < emitEnd && end > emitEnd) emitEnd = end;
       }
+    }
+    if (
+      emitEnd > 0 &&
+      emitEnd < combined.length &&
+      combined.charCodeAt(emitEnd - 1) >= 0xd800 &&
+      combined.charCodeAt(emitEnd - 1) <= 0xdbff &&
+      combined.charCodeAt(emitEnd) >= 0xdc00 &&
+      combined.charCodeAt(emitEnd) <= 0xdfff
+    ) {
+      emitEnd -= 1;
     }
     const emitted = combined.slice(0, emitEnd);
     this.#pending = combined.slice(emitEnd);

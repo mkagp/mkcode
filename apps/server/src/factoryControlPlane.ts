@@ -79,7 +79,9 @@ export const createRegisteredProjectWorkflow = Effect.fn(
         workflowType: input.workflowType,
         requestedBy: input.requestedBy,
         projectSnapshot: registration.resolvedConfiguration,
-        ...(input.validationCheckId ? { validationCheckId: input.validationCheckId } : {}),
+        ...(input.validationCheckId === undefined
+          ? {}
+          : { validationCheckId: input.validationCheckId }),
       }),
     catch: (cause) =>
       cause instanceof FactoryWorkerClientError && cause.status !== 504

@@ -78,15 +78,10 @@ export class SimulationWorker {
     this.#activeController?.abort();
   }
 
-  async runOnce(): Promise<boolean> {
-    if (this.#stopping) return false;
-    const claimed = this.#engine.claimNextJob(this.#workerInstanceId, this.#leaseMilliseconds);
-    if (!claimed) return false;
-    await this.runClaimed(claimed);
-    return true;
-  }
-
   async runClaimed(claimed: ClaimedJob): Promise<void> {
+    if (claimed.job.jobType === "command.execute") {
+      throw new TypeError("Simulation worker received a command-execution job.");
+    }
     let outcome: SimulationOutcome;
     const controller = new AbortController();
     this.#activeController = controller;
