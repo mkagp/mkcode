@@ -55,3 +55,43 @@ agents.
   examples of idiomatic usage, tests, module structure, and API design.
 - When writing relay infrastructure code with Alchemy, inspect `.repos/alchemy-effect/` for examples of
   idiomatic usage, tests, module structure, and API design.
+
+## MK Code Transformation Guardrails
+
+- This repository is becoming **MK Code**, an independently maintained product
+  derived from the fixed T3 Code baseline at
+  `ecb35f75839925dd1ac6f854efeef5c9e291d11b`. Full upstream feature parity is
+  not a goal; evaluate upstream changes selectively against MK Code's needs.
+- Inspect the current architecture, startup paths, package graph, imports, tests,
+  and release consumers before making cross-cutting changes. Major deletions
+  require concrete dependency and consumer evidence.
+- Keep interactive sessions and automated factory workflows as separate domains.
+  Interactive threads, turns, provider tasks, terminals, and process state are
+  not authoritative workflow state.
+- Keep workflow engine, persistence, runtime execution, deterministic commands,
+  and integrations out of browser components. The browser consumes APIs and
+  event contracts; it does not own workflow transitions.
+- Prefer provider-neutral AgentDefinition, TeamDefinition, WorkflowDefinition,
+  ExecutionProfile, AgentRuntime, and ProcessHost boundaries. Semantic roles
+  must not embed providers or model names.
+- Deterministic validation must execute project-declared commands and record
+  process results. Agent prompts and self-reported success cannot replace lint,
+  typecheck, test, build, or other controller-owned validation.
+- Agents may request delegation, but deterministic factory code must validate
+  policy and launch every agent instance. Agents must not directly create
+  unregistered agents or arbitrary operating-system processes.
+- Treat Herdr as a replaceable process-hosting and observability integration, not
+  the workflow state store or source of retry, approval, validation, or work-item
+  truth.
+- Preserve the root T3 Tools Inc. MIT attribution and all applicable retained
+  third-party notices. Rebranding must not erase license obligations.
+- Treat display branding separately from persisted and protocol identifiers.
+  Before changing `.t3`, `T3CODE_*`, database paths, storage keys, cookies, URL
+  schemes, package names, IPC channels, or update channels, follow
+  `docs/mkcode/COMPATIBILITY_INVENTORY.md` and provide an explicit migration,
+  alias, fallback-read, compatibility-window, and rollback strategy as
+  applicable.
+- Do not commit, push, create pull requests, merge, publish packages, or deploy
+  services unless the user explicitly directs that external action.
+- Read `docs/mkcode/README.md` and the relevant current/target architecture and
+  ADR documents before implementing MK Code transformation work.
