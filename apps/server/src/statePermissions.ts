@@ -82,6 +82,7 @@ const openLinuxPathWithoutSymlinks = Effect.fn("StatePermissions.openLinuxPathWi
 
     for (const [index, component] of components.entries()) {
       const isFinalComponent = index === components.length - 1;
+      // A FIFO or device must reach fstat without blocking this validation.
       const flags =
         NodeFS.constants.O_RDONLY |
         NodeFS.constants.O_NOFOLLOW |
