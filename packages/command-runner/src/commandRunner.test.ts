@@ -5,7 +5,6 @@ import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as NodeProcess from "node:process";
-import * as NodeTimers from "node:timers";
 
 import { afterEach, describe, expect, it } from "@effect/vitest";
 
@@ -355,44 +354,33 @@ describe("DeterministicCommandRunner", () => {
     await expect(pending).resolves.toMatchObject({ outcome: "cancelled", cancelled: true });
   });
 
-  it("enforces cancellation while launch persistence is unresolved", async () => {
+  it("requires launch persistence to complete synchronously", async () => {
     const root = await temporaryRoot();
-    const controller = new AbortController();
     const runner = new DeterministicCommandRunner({
       stateRoot: NodePath.join(root, "state"),
       terminationGraceMilliseconds: 50,
     });
-    const pending = runner.execute({
-      definition: definition({ args: ["-e", "setInterval(() => {}, 1000)"] }),
-      executionRoot: root,
-      signal: controller.signal,
-      onStarted: () => new Promise<void>(() => {}),
-    });
-    const timer = NodeTimers.setTimeout(() => controller.abort(), 50);
-    await expect(pending).resolves.toMatchObject({ outcome: "cancelled", cancelled: true });
-    NodeTimers.clearTimeout(timer);
+    await expect(
+      runner.execute({
+        definition: definition({ args: ["-e", "setInterval(() => {}, 1000)"] }),
+        executionRoot: root,
+        onStarted: () => new Promise<void>(() => {}),
+      }),
+    ).rejects.toThrow("complete synchronously");
   });
 
-  it("preserves a fast process exit while launch persistence finishes", async () => {
+  it("records launch synchronously before observing a fast process exit", async () => {
     const root = await temporaryRoot();
     const runner = new DeterministicCommandRunner({ stateRoot: NodePath.join(root, "state") });
+    let started = false;
     const result = await runner.execute({
       definition: definition({ args: ["-e", "process.exit(0)"], timeoutSeconds: 1 }),
       executionRoot: root,
-      onStarted: () => new Promise((resolve) => NodeTimers.setTimeout(resolve, 1_100)),
+      onStarted: () => {
+        started = true;
+      },
     });
-    expect(result.outcome).toBe("passed");
-    expect(result.timedOut).toBe(false);
-  });
-
-  it("does not hang when launch persistence never settles after a fast exit", async () => {
-    const root = await temporaryRoot();
-    const runner = new DeterministicCommandRunner({ stateRoot: NodePath.join(root, "state") });
-    const result = await runner.execute({
-      definition: definition({ args: ["-e", "process.exit(0)"], timeoutSeconds: 1 }),
-      executionRoot: root,
-      onStarted: () => new Promise<void>(() => {}),
-    });
+    expect(started).toBe(true);
     expect(result.outcome).toBe("passed");
     expect(result.timedOut).toBe(false);
   });

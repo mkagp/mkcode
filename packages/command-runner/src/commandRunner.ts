@@ -69,11 +69,18 @@ const wait = (milliseconds: number): Promise<void> =>
     timer.unref();
   });
 
-const canonicalDirectory = async (executionRoot: string, configuredDirectory: string) => {
+const canonicalDirectory = async (
+  executionRoot: string,
+  configuredDirectory: string,
+  expectedRoot?: string,
+) => {
   if (NodePath.isAbsolute(configuredDirectory)) {
     throw new TypeError("Command working directory must be relative.");
   }
   const root = await NodeFSP.realpath(executionRoot);
+  if (expectedRoot !== undefined && root !== expectedRoot) {
+    throw new TypeError("Execution root changed after initial validation.");
+  }
   const rootStat = await NodeFSP.stat(root);
   if (!rootStat.isDirectory()) throw new TypeError("Execution root must be a directory.");
   const lexical = NodePath.resolve(root, configuredDirectory);
@@ -142,7 +149,7 @@ export class DeterministicCommandRunner {
     readonly definition: ProjectCommandSnapshot;
     readonly executionRoot: string;
     readonly signal?: AbortSignal;
-    readonly onStarted?: (started: CommandExecutionStarted) => void | Promise<void>;
+    readonly onStarted?: (started: CommandExecutionStarted) => void;
   }): Promise<CommandExecutionResult> {
     if (input.definition.executable.trim().length === 0) {
       throw new TypeError("Executable must not be empty.");
@@ -216,7 +223,11 @@ export class DeterministicCommandRunner {
     let launchedWorkingDirectory = workingDirectory;
     try {
       // Re-resolve immediately before spawn to narrow the path replacement window.
-      const immediate = await canonicalDirectory(root, input.definition.workingDirectory);
+      const immediate = await canonicalDirectory(
+        input.executionRoot,
+        input.definition.workingDirectory,
+        root,
+      );
       hosted = await this.#host.start({
         executionId,
         executable: input.definition.executable,
@@ -264,28 +275,24 @@ export class DeterministicCommandRunner {
         removeAbort = () => input.signal?.removeEventListener("abort", onAbort);
       }
     });
-    const started = Promise.resolve()
-      .then(() =>
-        input.onStarted?.({
-          executionId,
-          processHostType: this.#host.type,
-          ...(hosted.nativePid === undefined ? {} : { nativePid: hosted.nativePid }),
-          startedAt: startedAt.toISOString(),
-          timeoutDeadline,
-          workingDirectory: launchedWorkingDirectory,
-        }),
-      )
-      .then(
-        () => ({ kind: "started" as const }),
-        (cause: unknown) => ({ kind: "start_failed" as const, cause }),
-      );
-    const processCompletion = hosted.completion.then((exit) => ({ kind: "exit" as const, exit }));
-    const startGate = await Promise.race([
-      started,
-      processCompletion,
-      control.then((reason) => ({ kind: "control" as const, reason })),
-    ]);
-    if (startGate.kind === "start_failed") {
+    try {
+      const callbackResult: unknown = input.onStarted?.({
+        executionId,
+        processHostType: this.#host.type,
+        ...(hosted.nativePid === undefined ? {} : { nativePid: hosted.nativePid }),
+        startedAt: startedAt.toISOString(),
+        timeoutDeadline,
+        workingDirectory: launchedWorkingDirectory,
+      });
+      if (
+        callbackResult !== null &&
+        typeof callbackResult === "object" &&
+        "then" in callbackResult
+      ) {
+        void Promise.resolve(callbackResult).catch(() => undefined);
+        throw new TypeError("Command start persistence must complete synchronously.");
+      }
+    } catch (cause) {
       if (timeout) NodeTimers.clearTimeout(timeout);
       removeAbort();
       await this.#host.interrupt(executionId);
@@ -298,32 +305,13 @@ export class DeterministicCommandRunner {
         await hosted.completion;
       }
       await closeArtifacts();
-      throw startGate.cause;
+      throw cause;
     }
 
-    let first:
-      | { readonly kind: "exit"; readonly exit: ProcessExit }
-      | { readonly kind: "control"; readonly reason: "timed_out" | "cancelled" };
-    if (startGate.kind === "exit") {
-      const persistedStart = await Promise.race([
-        started,
-        control.then(() => ({ kind: "control" as const })),
-      ]);
-      if (persistedStart.kind === "start_failed") {
-        if (timeout) NodeTimers.clearTimeout(timeout);
-        removeAbort();
-        await closeArtifacts();
-        throw persistedStart.cause;
-      }
-      first = startGate;
-    } else if (startGate.kind === "control") {
-      first = startGate;
-    } else {
-      first = await Promise.race([
-        processCompletion,
-        control.then((reason) => ({ kind: "control" as const, reason })),
-      ]);
-    }
+    const first = await Promise.race([
+      hosted.completion.then((exit) => ({ kind: "exit" as const, exit })),
+      control.then((reason) => ({ kind: "control" as const, reason })),
+    ]);
 
     let exit: ProcessExit;
     let forcedOutcome: "timed_out" | "cancelled" | undefined;
