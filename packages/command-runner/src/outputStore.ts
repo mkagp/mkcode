@@ -104,15 +104,28 @@ export class CommandOutputStore {
     await ensurePrivateDirectory(this.outputRoot);
     const executionDirectory = NodePath.join(this.outputRoot, executionId);
     await ensurePrivateDirectory(executionDirectory);
+    const stdoutPath = NodePath.join(executionDirectory, "stdout.log");
+    const stderrPath = NodePath.join(executionDirectory, "stderr.log");
+    const stdout = await this.#createStream(stdoutPath, redactionValues);
+    let stderr: StreamCapture;
+    try {
+      stderr = await this.#createStream(stderrPath, redactionValues);
+    } catch (cause) {
+      try {
+        await stdout.close();
+      } catch {
+        // Preserve the stream-creation error while still attempting rollback.
+      }
+      try {
+        await NodeFSP.rm(stdoutPath, { force: true });
+      } catch {
+        // The original stream-creation error remains the actionable failure.
+      }
+      throw cause;
+    }
     return {
-      stdout: await this.#createStream(
-        NodePath.join(executionDirectory, "stdout.log"),
-        redactionValues,
-      ),
-      stderr: await this.#createStream(
-        NodePath.join(executionDirectory, "stderr.log"),
-        redactionValues,
-      ),
+      stdout,
+      stderr,
     };
   }
 

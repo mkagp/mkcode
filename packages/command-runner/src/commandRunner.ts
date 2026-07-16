@@ -22,6 +22,7 @@ const DEFAULT_BASE_ENVIRONMENT = [
   "LC_CTYPE",
 ] as const;
 const DEFAULT_TERMINATION_GRACE_MILLISECONDS = 2_000;
+const MAX_COMMAND_TIMEOUT_SECONDS = 86_400;
 
 export type ProjectCommandSnapshot = ResolvedProjectCommand | ResolvedProjectCheck;
 
@@ -148,9 +149,12 @@ export class DeterministicCommandRunner {
     }
     if (
       !Number.isSafeInteger(input.definition.timeoutSeconds) ||
-      input.definition.timeoutSeconds < 1
+      input.definition.timeoutSeconds < 1 ||
+      input.definition.timeoutSeconds > MAX_COMMAND_TIMEOUT_SECONDS
     ) {
-      throw new TypeError("Command timeout must be a positive safe integer.");
+      throw new TypeError(
+        `Command timeout must be an integer between 1 and ${MAX_COMMAND_TIMEOUT_SECONDS}.`,
+      );
     }
     const { root, workingDirectory } = await canonicalDirectory(
       input.executionRoot,
@@ -301,7 +305,10 @@ export class DeterministicCommandRunner {
       | { readonly kind: "exit"; readonly exit: ProcessExit }
       | { readonly kind: "control"; readonly reason: "timed_out" | "cancelled" };
     if (startGate.kind === "exit") {
-      const persistedStart = await started;
+      const persistedStart = await Promise.race([
+        started,
+        control.then(() => ({ kind: "control" as const })),
+      ]);
       if (persistedStart.kind === "start_failed") {
         if (timeout) NodeTimers.clearTimeout(timeout);
         removeAbort();

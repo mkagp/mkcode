@@ -273,6 +273,18 @@ describe("DeterministicCommandRunner", () => {
     ).rejects.toThrow("outside");
   });
 
+  it("rejects out-of-policy timeouts before process startup", async () => {
+    const root = await temporaryRoot();
+    const runner = new DeterministicCommandRunner({ stateRoot: NodePath.join(root, "state") });
+    await expect(
+      runner.execute({
+        definition: definition({ timeoutSeconds: 86_401 }),
+        executionRoot: root,
+      }),
+    ).rejects.toThrow("between 1 and 86400");
+    await expect(NodeFSP.stat(NodePath.join(root, "state"))).rejects.toThrow();
+  });
+
   it("times out and terminates a process", async () => {
     const root = await temporaryRoot();
     const runner = new DeterministicCommandRunner({
@@ -373,6 +385,18 @@ describe("DeterministicCommandRunner", () => {
     expect(result.timedOut).toBe(false);
   });
 
+  it("does not hang when launch persistence never settles after a fast exit", async () => {
+    const root = await temporaryRoot();
+    const runner = new DeterministicCommandRunner({ stateRoot: NodePath.join(root, "state") });
+    const result = await runner.execute({
+      definition: definition({ args: ["-e", "process.exit(0)"], timeoutSeconds: 1 }),
+      executionRoot: root,
+      onStarted: () => new Promise<void>(() => {}),
+    });
+    expect(result.outcome).toBe("passed");
+    expect(result.timedOut).toBe(false);
+  });
+
   it("bounds output and marks truncation", async () => {
     const root = await temporaryRoot();
     const runner = new DeterministicCommandRunner({
@@ -454,6 +478,19 @@ describe("CommandOutputStore", () => {
     await expect(store.readPage({ locationReference: "../outside-secret" })).rejects.toThrow(
       "escapes",
     );
+  });
+
+  it("rolls back stdout capture when stderr capture creation fails", async () => {
+    const root = await temporaryRoot();
+    const state = NodePath.join(root, "state");
+    const executionDirectory = NodePath.join(state, "command-output", "partial-capture");
+    await NodeFSP.mkdir(executionDirectory, { recursive: true });
+    await NodeFSP.writeFile(NodePath.join(executionDirectory, "stderr.log"), "occupied");
+    const store = new CommandOutputStore({ stateRoot: state });
+    await expect(store.createCapture("partial-capture", [])).rejects.toMatchObject({
+      code: "EEXIST",
+    });
+    await expect(NodeFSP.stat(NodePath.join(executionDirectory, "stdout.log"))).rejects.toThrow();
   });
 
   it("rejects reads after the state root is replaced by a symlink", async () => {

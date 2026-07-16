@@ -1502,13 +1502,19 @@ export class WorkflowEngine {
             .get(job.stageRunId) as SqlRow | undefined;
           if (command) {
             const commandId = asString(command, "id");
-            this.#database
+            const update = this.#database
               .prepare(
                 `UPDATE command_runs SET status = 'spawn_failed', outcome = 'spawn_failed',
                  completed_at = ?, failure_classification = 'invalid_command_snapshot',
                  version = version + 1 WHERE id = ? AND status = 'pending'`,
               )
               .run(now, commandId);
+            if (Number(update.changes) !== 1) {
+              throw new WorkflowEngineError(
+                "conflict",
+                "A command job can only fail before its command starts.",
+              );
+            }
             this.#insertEvent(job.workflowRunId, "command.failed", {
               commandRunId: commandId,
               outcome: "spawn_failed",

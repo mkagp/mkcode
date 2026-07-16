@@ -357,6 +357,41 @@ describe("durable command execution", () => {
     engine.close();
   });
 
+  it("rejects terminal job failure after the linked command has started", async () => {
+    const root = await makeRoot();
+    const engine = await WorkflowEngine.open({ stateDirectory: NodePath.join(root, "state") });
+    const created = createCommandWorkflow(engine, root);
+    const claimed = claimValidation(engine);
+    const pending = engine.readWorkflow(created.workflowRun.id).commands[0];
+    NodeAssert.ok(pending);
+    engine.startCommand({
+      commandRunId: pending.id,
+      jobId: claimed.job.id,
+      leaseOwner: "worker-a",
+      attemptId: claimed.attempt.id,
+      expectedStageVersion: claimed.stageVersion,
+      processHostExecutionId: "execution-1",
+      processHostType: "local",
+      stdoutArtifactReference: "command-output/execution-1/stdout.log",
+      stderrArtifactReference: "command-output/execution-1/stderr.log",
+    });
+    NodeAssert.throws(
+      () =>
+        engine.failJob({
+          jobId: claimed.job.id,
+          leaseOwner: "worker-a",
+          retryable: false,
+          failureSummary: "late terminal failure",
+          expectedStageVersion: claimed.stageVersion,
+        }),
+      /only fail before/u,
+    );
+    const detail = engine.readWorkflow(created.workflowRun.id);
+    NodeAssert.equal(detail.workflowRun.status, "validating");
+    NodeAssert.equal(detail.commands[0]?.status, "starting");
+    engine.close();
+  });
+
   it("marks an unconfirmed local process as operator attention on restart", async () => {
     const root = await makeRoot();
     const stateDirectory = NodePath.join(root, "state");
