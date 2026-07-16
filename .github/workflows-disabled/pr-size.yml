@@ -1,3 +1,4 @@
+# Disabled inherited T3 workflow. See .github/workflows-disabled/README.md.
 name: PR Size
 
 on:

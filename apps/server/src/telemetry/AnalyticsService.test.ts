@@ -3,6 +3,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import * as ConfigProvider from "effect/ConfigProvider";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as HttpServer from "effect/unstable/http/HttpServer";
 import * as HttpServerRequest from "effect/unstable/http/HttpServerRequest";
@@ -36,6 +37,78 @@ interface RecordedBatchBody {
 }
 
 it.layer(NodeServices.layer)("AnalyticsService test", (it) => {
+  it.effect("defaults to disabled without reading identity or sending requests", () =>
+    Effect.gen(function* () {
+      const capturedRequests: Array<RecordedBatchRequest> = [];
+      const serverConfigLayer = ServerConfig.ServerConfig.layerTest(process.cwd(), {
+        prefix: "mkcode-telemetry-disabled-",
+      });
+      const telemetryLayer = AnalyticsService.layer.pipe(Layer.provideMerge(serverConfigLayer));
+      const configLayer = ConfigProvider.layer(
+        ConfigProvider.fromUnknown({
+          T3CODE_POSTHOG_HOST: "",
+        }),
+      );
+      const batchServerLayer = HttpServer.serve(
+        Effect.gen(function* () {
+          const request = yield* HttpServerRequest.HttpServerRequest;
+          const payload = yield* request.json.pipe(
+            Effect.map((body) => body as RecordedBatchRequest["body"]),
+            Effect.orElseSucceed(() => null),
+          );
+          capturedRequests.push({ path: request.url, body: payload });
+          return HttpServerResponse.jsonUnsafe({});
+        }),
+      );
+      const runtimeLayer = telemetryLayer.pipe(
+        Layer.provide(configLayer),
+        Layer.provideMerge(NodeHttpServer.layerTest),
+      );
+
+      yield* Effect.gen(function* () {
+        yield* Layer.launch(batchServerLayer).pipe(Effect.forkScoped);
+        const config = yield* ServerConfig.ServerConfig;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const analytics = yield* AnalyticsService.AnalyticsService;
+
+        yield* analytics.record("test.disabled.default");
+        yield* analytics.flush;
+
+        assert.equal(capturedRequests.length, 0);
+        assert.equal(yield* fileSystem.exists(config.anonymousIdPath), false);
+      }).pipe(Effect.provide(runtimeLayer));
+    }),
+  );
+
+  it.effect("fails closed when opt-in configuration is incomplete", () =>
+    Effect.gen(function* () {
+      const serverConfigLayer = ServerConfig.ServerConfig.layerTest(process.cwd(), {
+        prefix: "mkcode-telemetry-incomplete-opt-in-",
+      });
+      const telemetryLayer = AnalyticsService.layer.pipe(Layer.provideMerge(serverConfigLayer));
+      const configLayer = ConfigProvider.layer(
+        ConfigProvider.fromUnknown({
+          T3CODE_TELEMETRY_ENABLED: true,
+        }),
+      );
+      const runtimeLayer = telemetryLayer.pipe(
+        Layer.provide(configLayer),
+        Layer.provideMerge(NodeHttpServer.layerTest),
+      );
+
+      yield* Effect.gen(function* () {
+        const config = yield* ServerConfig.ServerConfig;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const analytics = yield* AnalyticsService.AnalyticsService;
+
+        yield* analytics.record("test.disabled.incomplete-opt-in");
+        yield* analytics.flush;
+
+        assert.equal(yield* fileSystem.exists(config.anonymousIdPath), false);
+      }).pipe(Effect.provide(runtimeLayer));
+    }),
+  );
+
   it.effect("flush drains all buffered events across multiple batches", () =>
     Effect.gen(function* () {
       const capturedRequests: Array<RecordedBatchRequest> = [];

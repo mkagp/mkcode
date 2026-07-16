@@ -1,3 +1,4 @@
+# Disabled inherited T3 workflow. See .github/workflows-disabled/README.md.
 name: Mobile EAS Production
 
 # Production builds and OTA updates run from CI (Linux) — never from a laptop.

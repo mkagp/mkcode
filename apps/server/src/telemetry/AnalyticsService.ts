@@ -1,5 +1,5 @@
 /**
- * Anonymous PostHog telemetry service.
+ * Explicitly opt-in anonymous PostHog telemetry service.
  *
  * Persists an installation-scoped anonymous identifier, buffers events in
  * memory, and flushes batches over Effect's HTTP client.
@@ -28,14 +28,15 @@ interface BufferedAnalyticsEvent {
   readonly capturedAt: string;
 }
 
-const TelemetryEnvConfig = Config.all({
-  posthogKey: Config.string("T3CODE_POSTHOG_KEY").pipe(
-    Config.withDefault("phc_XOWci4oZP4VvLiEyrFqkFjP4CZn55mjYYBMREK5Wd6m"),
-  ),
+const TelemetryEnabledConfig = Config.boolean("T3CODE_TELEMETRY_ENABLED").pipe(
+  Config.withDefault(false),
+);
+
+const TelemetryDeliveryConfig = Config.all({
+  posthogKey: Config.string("T3CODE_POSTHOG_KEY"),
   posthogHost: Config.string("T3CODE_POSTHOG_HOST").pipe(
     Config.withDefault("https://us.i.posthog.com"),
   ),
-  enabled: Config.boolean("T3CODE_TELEMETRY_ENABLED").pipe(Config.withDefault(true)),
   flushBatchSize: Config.number("T3CODE_TELEMETRY_FLUSH_BATCH_SIZE").pipe(Config.withDefault(20)),
   maxBufferedEvents: Config.number("T3CODE_TELEMETRY_MAX_BUFFERED_EVENTS").pipe(
     Config.withDefault(1_000),
@@ -56,18 +57,22 @@ export class AnalyticsService extends Context.Service<
     readonly flush: Effect.Effect<void>;
   }
 >()("t3/telemetry/AnalyticsService") {
+  static readonly disabled = AnalyticsService.of({
+    record: () => Effect.void,
+    flush: Effect.void,
+  });
+
   /** No-op layer for callers that intentionally disable telemetry. */
-  static readonly layerTest = Layer.succeed(
-    AnalyticsService,
-    AnalyticsService.of({
-      record: () => Effect.void,
-      flush: Effect.void,
-    }),
-  );
+  static readonly layerTest = Layer.succeed(AnalyticsService, AnalyticsService.disabled);
 }
 
 export const make = Effect.gen(function* () {
-  const telemetryConfig = yield* TelemetryEnvConfig;
+  const telemetryEnabled = yield* TelemetryEnabledConfig;
+  if (!telemetryEnabled) {
+    return AnalyticsService.disabled;
+  }
+
+  const telemetryConfig = yield* TelemetryDeliveryConfig;
   const httpClient = yield* HttpClient.HttpClient;
   const serverConfig = yield* ServerConfig.ServerConfig;
   const identifier = yield* getTelemetryIdentifier;
@@ -106,7 +111,7 @@ export const make = Effect.gen(function* () {
   const sendBatch = Effect.fn("AnalyticsService.sendBatch")(function* (
     events: ReadonlyArray<BufferedAnalyticsEvent>,
   ) {
-    if (!telemetryConfig.enabled || !identifier) return;
+    if (!identifier) return;
 
     const payload = {
       api_key: telemetryConfig.posthogKey,
@@ -160,7 +165,7 @@ export const make = Effect.gen(function* () {
 
   const record: AnalyticsService["Service"]["record"] = Effect.fn("AnalyticsService.record")(
     function* (event, properties) {
-      if (!telemetryConfig.enabled || !identifier) return;
+      if (!identifier) return;
 
       const enqueueResult = yield* enqueueBufferedEvent(event, properties);
       if (enqueueResult.dropped) {
@@ -181,6 +186,15 @@ export const make = Effect.gen(function* () {
   return AnalyticsService.of({ record, flush });
 });
 
-export const layer = Layer.effect(AnalyticsService, make);
+export const layer = Layer.effect(
+  AnalyticsService,
+  make.pipe(
+    Effect.catchCause(() =>
+      Effect.logWarning("Telemetry initialization failed; telemetry remains disabled").pipe(
+        Effect.as(AnalyticsService.disabled),
+      ),
+    ),
+  ),
+);
 
 export const layerTest = AnalyticsService.layerTest;

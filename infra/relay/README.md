@@ -114,11 +114,14 @@ the URL manually.
 
 ### Deployment CI
 
-The relay is versioned separately from client releases. `.github/workflows/deploy-relay.yml` deploys
-the shared Alchemy `prod` stage on every push to `main`. Stable and nightly release builds both
-resolve their static public config from the same
-`production` GitHub environment. Pull requests do not deploy relay stages. Developers can
-deploy personal non-production stages locally with any stage name other than `prod`.
+MK Code does not currently deploy the relay from GitHub Actions. The inherited deployment and
+release definitions are retained as inactive references at
+`.github/workflows-disabled/deploy-relay.yml` and `.github/workflows-disabled/release.yml`.
+Before the fork-safety change, the relay workflow deployed the shared Alchemy `prod` stage on every
+push to `main`; stable and nightly release builds resolved their static public config from the same
+`production` GitHub environment. Pull requests did not deploy relay stages. Developers can still
+deploy personal non-production stages locally with any stage name other than `prod`, but this
+documentation does not authorize production deployment.
 
 The repository must define these Actions variables shared by relay deployments:
 

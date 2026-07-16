@@ -200,12 +200,12 @@ describe("serializeRelayClientTracingEnvironment", () => {
 });
 
 describe("release workflow tracing config propagation", () => {
-  it.effect("uses an artifact instead of a masked cross-job token output", () =>
+  it.effect("keeps the disabled release reference free of masked cross-job token output", () =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
       const workflowPath = yield* path.fromFileUrl(
-        new URL("../../../.github/workflows/release.yml", import.meta.url),
+        new URL("../../../.github/workflows-disabled/release.yml", import.meta.url),
       );
       const workflow = yield* fileSystem.readFileString(workflowPath);
 
