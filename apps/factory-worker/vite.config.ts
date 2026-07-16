@@ -12,7 +12,12 @@ export default mergeConfig(
       clean: true,
       sourcemap: true,
       deps: {
-        alwaysBundle: ["@mkcode/factory-contracts", "@mkcode/workflow-engine"],
+        alwaysBundle: [
+          "@mkcode/command-runner",
+          "@mkcode/factory-contracts",
+          "@mkcode/project-config",
+          "@mkcode/workflow-engine",
+        ],
       },
       banner: {
         js: "#!/usr/bin/env node\n",

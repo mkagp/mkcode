@@ -1,5 +1,5 @@
 {
-  "name": "@mkcode/factory-worker",
+  "name": "@mkcode/command-runner",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -10,18 +10,11 @@
     }
   },
   "scripts": {
-    "dev": "node --watch src/bin.ts",
-    "start": "node src/bin.ts",
-    "build": "vp pack",
     "typecheck": "tsgo --noEmit",
     "test": "vp test run"
   },
   "dependencies": {
-    "@mkcode/command-runner": "workspace:*",
-    "@mkcode/factory-contracts": "workspace:*",
-    "@mkcode/project-config": "workspace:*",
-    "@mkcode/workflow-engine": "workspace:*",
-    "effect": "catalog:"
+    "@mkcode/project-config": "workspace:*"
   },
   "devDependencies": {
     "@effect/vitest": "catalog:",
