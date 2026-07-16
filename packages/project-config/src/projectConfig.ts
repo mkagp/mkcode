@@ -3,6 +3,7 @@ import * as Effect from "effect/Effect";
 import * as Encoding from "effect/Encoding";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
+import * as PlatformError from "effect/PlatformError";
 import * as Schema from "effect/Schema";
 import * as SchemaIssue from "effect/SchemaIssue";
 import { parseDocument } from "yaml";
@@ -23,10 +24,32 @@ import {
 export const PROJECT_CONFIG_RELATIVE_PATH = ".mkcode/project.yaml";
 export const PROJECT_CONFIG_VERSION = 1 as const;
 export const DEFAULT_COMMAND_TIMEOUT_SECONDS = 300;
+const FILESYSTEM_VALIDATION_CONCURRENCY = 8;
 
 const PROJECT_ID_PATTERN = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/u;
 const REFERENCE_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._/-]*$/u;
 const ENVIRONMENT_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/u;
+const isGitBranchReference = (value: string): boolean => {
+  if (
+    !REFERENCE_PATTERN.test(value) ||
+    value === "@" ||
+    value.startsWith("-") ||
+    value.startsWith("/") ||
+    value.endsWith("/") ||
+    value.endsWith(".") ||
+    value.includes("//") ||
+    value.includes("..") ||
+    value.includes("@{")
+  ) {
+    return false;
+  }
+  return value
+    .split("/")
+    .every(
+      (component) =>
+        component.length > 0 && !component.startsWith(".") && !component.endsWith(".lock"),
+    );
+};
 const decodeProjectConfigurationFile = Schema.decodeUnknownEffect(ProjectConfigurationFile, {
   onExcessProperty: "error",
   errors: "all",
@@ -255,7 +278,7 @@ function semanticIssues(config: ProjectConfigurationFileType): ReadonlyArray<Pro
   }
   requireText(config.project.name, "project.name");
   requireText(config.repository.baseBranch, "repository.baseBranch");
-  if (!REFERENCE_PATTERN.test(config.repository.baseBranch)) {
+  if (!isGitBranchReference(config.repository.baseBranch)) {
     issues.push({
       code: "invalid_reference",
       path: "repository.baseBranch",
@@ -344,18 +367,32 @@ export const resolveProjectConfiguration = (input: {
     const crypto = yield* Crypto.Crypto;
     const config = yield* parseProjectConfiguration(input);
     const issues = [...semanticIssues(config)];
+    const fileSystemIssue = (
+      cause: PlatformError.PlatformError,
+      details: {
+        readonly path: string;
+        readonly missingCode: ProjectConfigIssue["code"];
+        readonly missingMessage: string;
+        readonly readMessage: string;
+      },
+    ): ProjectConfigIssue => ({
+      code: cause.reason._tag === "NotFound" ? details.missingCode : "read_failed",
+      path: details.path,
+      message: cause.reason._tag === "NotFound" ? details.missingMessage : details.readMessage,
+    });
 
     const repositoryRoot = yield* fs.realPath(input.repositoryRoot).pipe(
       Effect.mapError(
-        () =>
+        (cause) =>
           new ProjectConfigError({
             sourcePath: input.sourcePath,
             issues: [
-              {
-                code: "path_missing",
+              fileSystemIssue(cause, {
                 path: "repositoryRoot",
-                message: "The registered repository root does not exist.",
-              },
+                missingCode: "path_missing",
+                missingMessage: "The registered repository root does not exist.",
+                readMessage: "The registered repository root could not be inspected.",
+              }),
             ],
             message: `Project configuration at '${input.sourcePath}' could not be resolved.`,
           }),
@@ -404,16 +441,19 @@ export const resolveProjectConfiguration = (input: {
       Effect.gen(function* () {
         const candidate = lexicalPath(relativePath, issuePath, allowRoot);
         if (!candidate) return undefined;
-        const canonical = yield* fs.realPath(candidate.absolute).pipe(Effect.option);
-        if (canonical._tag === "None") {
-          issues.push({
-            code: "path_missing",
-            path: issuePath,
-            message: "Referenced path does not exist.",
-          });
+        const canonical = yield* Effect.result(fs.realPath(candidate.absolute));
+        if (canonical._tag === "Failure") {
+          issues.push(
+            fileSystemIssue(canonical.failure, {
+              path: issuePath,
+              missingCode: "path_missing",
+              missingMessage: "Referenced path does not exist.",
+              readMessage: "Referenced path could not be inspected.",
+            }),
+          );
           return undefined;
         }
-        if (!insideRoot(canonical.value)) {
+        if (!insideRoot(canonical.success)) {
           issues.push({
             code: "path_symlink_escape",
             path: issuePath,
@@ -421,8 +461,19 @@ export const resolveProjectConfiguration = (input: {
           });
           return undefined;
         }
-        const info = yield* fs.stat(canonical.value).pipe(Effect.option);
-        if (info._tag === "None" || info.value.type !== expected) {
+        const info = yield* Effect.result(fs.stat(canonical.success));
+        if (info._tag === "Failure") {
+          issues.push(
+            fileSystemIssue(info.failure, {
+              path: issuePath,
+              missingCode: "path_missing",
+              missingMessage: "Referenced path does not exist.",
+              readMessage: "Referenced path could not be inspected.",
+            }),
+          );
+          return undefined;
+        }
+        if (info.success.type !== expected) {
           issues.push({
             code: expected === "Directory" ? "path_not_directory" : "path_not_file",
             path: issuePath,
@@ -430,31 +481,155 @@ export const resolveProjectConfiguration = (input: {
           });
           return undefined;
         }
-        return { relative: candidate.relative, absolute: canonical.value };
+        return { relative: candidate.relative, absolute: canonical.success };
       });
 
-    const sourceCanonical = yield* fs.realPath(input.sourcePath).pipe(Effect.option);
-    if (sourceCanonical._tag === "None")
-      issues.push({
-        code: "file_missing",
-        path: "$",
-        message: "Project configuration file does not exist.",
-      });
-    else if (!insideRoot(sourceCanonical.value))
+    const sourceResult = yield* Effect.result(fs.realPath(input.sourcePath));
+    let sourceCanonical: string | undefined;
+    if (sourceResult._tag === "Failure") {
+      issues.push(
+        fileSystemIssue(sourceResult.failure, {
+          path: "$",
+          missingCode: "file_missing",
+          missingMessage: "Project configuration file does not exist.",
+          readMessage: "Project configuration file could not be inspected.",
+        }),
+      );
+    } else if (!insideRoot(sourceResult.success)) {
       issues.push({
         code: "path_symlink_escape",
         path: "$",
         message: "Project configuration resolves outside the registered repository.",
       });
+    } else {
+      sourceCanonical = sourceResult.success;
+    }
+
+    const futurePath = (relativePath: string, issuePath: string, expectedTarget?: "Directory") =>
+      Effect.gen(function* () {
+        const candidate = lexicalPath(relativePath, issuePath);
+        if (!candidate) return undefined;
+        let probe = candidate.absolute;
+
+        while (true) {
+          const canonical = yield* Effect.result(fs.realPath(probe));
+          if (canonical._tag === "Failure") {
+            if (canonical.failure.reason._tag !== "NotFound") {
+              issues.push(
+                fileSystemIssue(canonical.failure, {
+                  path: issuePath,
+                  missingCode: "path_missing",
+                  missingMessage: "Referenced path does not exist.",
+                  readMessage: "Referenced path could not be inspected.",
+                }),
+              );
+              return undefined;
+            }
+            const symbolicLink = yield* Effect.result(fs.readLink(probe));
+            if (symbolicLink._tag === "Success") {
+              issues.push({
+                code: "path_symlink_escape",
+                path: issuePath,
+                message: "Referenced path contains a dangling symbolic-link ancestor.",
+              });
+              return undefined;
+            }
+            if (symbolicLink.failure.reason._tag !== "NotFound") {
+              issues.push(
+                fileSystemIssue(symbolicLink.failure, {
+                  path: issuePath,
+                  missingCode: "path_missing",
+                  missingMessage: "Referenced path does not exist.",
+                  readMessage: "Referenced path could not be inspected without following links.",
+                }),
+              );
+              return undefined;
+            }
+            const parent = path.dirname(probe);
+            if (parent === probe) {
+              issues.push({
+                code: "read_failed",
+                path: issuePath,
+                message: "Referenced path has no inspectable existing ancestor.",
+              });
+              return undefined;
+            }
+            probe = parent;
+            continue;
+          }
+
+          if (!insideRoot(canonical.success)) {
+            issues.push({
+              code: "path_symlink_escape",
+              path: issuePath,
+              message: "Referenced path has an ancestor outside the registered repository.",
+            });
+            return undefined;
+          }
+          const info = yield* Effect.result(fs.stat(canonical.success));
+          if (info._tag === "Failure") {
+            issues.push(
+              fileSystemIssue(info.failure, {
+                path: issuePath,
+                missingCode: "path_missing",
+                missingMessage: "Referenced path does not exist.",
+                readMessage: "Referenced path could not be inspected.",
+              }),
+            );
+            return undefined;
+          }
+          const targetExists = probe === candidate.absolute;
+          if (
+            (!targetExists || expectedTarget === "Directory") &&
+            info.success.type !== "Directory"
+          ) {
+            issues.push({
+              code: "path_not_directory",
+              path: issuePath,
+              message: "Referenced path or its existing ancestor must be a directory.",
+            });
+            return undefined;
+          }
+          const suffix = path.relative(probe, candidate.absolute);
+          const absolute = path.resolve(canonical.success, suffix);
+          if (!insideRoot(absolute)) {
+            issues.push({
+              code: "path_symlink_escape",
+              path: issuePath,
+              message: "Referenced path resolves outside the registered repository.",
+            });
+            return undefined;
+          }
+          return { relative: candidate.relative, absolute };
+        }
+      });
 
     const normalizeArtifacts = (
       artifacts: ProjectCommandDefinition["artifacts"],
       basePath: string,
-    ): Array<ResolvedProjectArtifact> =>
-      (artifacts ?? []).flatMap((artifact, index) => {
-        const resolved = lexicalPath(artifact.path, `${basePath}.artifacts[${index}].path`);
-        return resolved ? [{ path: resolved.relative, optional: artifact.optional ?? false }] : [];
-      });
+    ) =>
+      Effect.all(
+        (artifacts ?? []).map((artifact, index) =>
+          futurePath(artifact.path, `${basePath}.artifacts[${index}].path`).pipe(
+            Effect.map((resolved) =>
+              resolved
+                ? ({
+                    path: resolved.relative,
+                    optional: artifact.optional ?? false,
+                  } satisfies ResolvedProjectArtifact)
+                : undefined,
+            ),
+          ),
+        ),
+        // Commands are already validated with bounded parallelism. Keep each
+        // command's artifact walk sequential so nested configuration cannot
+        // multiply the filesystem concurrency limit.
+        { concurrency: 1 },
+      ).pipe(
+        Effect.map((resolved) =>
+          resolved.filter((value): value is ResolvedProjectArtifact => value !== undefined),
+        ),
+      );
     const normalizeCommand = (
       command: ProjectCommandDefinition,
       basePath: string,
@@ -471,6 +646,7 @@ export const resolveProjectConfiguration = (input: {
           true,
         );
         if (!working) return undefined;
+        const artifacts = yield* normalizeArtifacts(command.artifacts, basePath);
         return {
           id: command.id,
           executable: command.executable.trim(),
@@ -479,12 +655,12 @@ export const resolveProjectConfiguration = (input: {
           resolvedWorkingDirectory: working.absolute,
           timeoutSeconds: command.timeoutSeconds ?? DEFAULT_COMMAND_TIMEOUT_SECONDS,
           environment: [...(command.environment ?? [])],
-          artifacts: normalizeArtifacts(command.artifacts, basePath),
+          artifacts,
         };
       });
     const setup = (yield* Effect.all(
       (config.setup ?? []).map((command, index) => normalizeCommand(command, `setup[${index}]`)),
-      { concurrency: "unbounded" },
+      { concurrency: FILESYSTEM_VALIDATION_CONCURRENCY },
     )).filter((value): value is ResolvedProjectCommand => value !== undefined);
     const checks = (yield* Effect.all(
       (config.checks ?? []).map((check, index) =>
@@ -499,20 +675,21 @@ export const resolveProjectConfiguration = (input: {
           ),
         ),
       ),
-      { concurrency: "unbounded" },
+      { concurrency: FILESYSTEM_VALIDATION_CONCURRENCY },
     )).filter((value): value is ResolvedProjectCheck => value !== undefined);
     const contextFiles = (yield* Effect.all(
       (config.repository.contextFiles ?? []).map((reference, index) =>
         existingPath(reference, `repository.contextFiles[${index}]`, "File"),
       ),
-      { concurrency: "unbounded" },
+      { concurrency: FILESYSTEM_VALIDATION_CONCURRENCY },
     ))
       .filter((value): value is { relative: string; absolute: string } => value !== undefined)
       .map((value) => ({ path: value.relative, resolvedPath: value.absolute }));
 
-    const worktree = lexicalPath(
+    const worktree = yield* futurePath(
       config.repository.worktreeRoot ?? ".mkcode/worktrees",
       "repository.worktreeRoot",
+      "Directory",
     );
     if (issues.length > 0 || !worktree) return yield* failConfig(input.sourcePath, issues);
     const digest = yield* crypto.digest("SHA-256", new TextEncoder().encode(input.contents)).pipe(
@@ -551,7 +728,7 @@ export const resolveProjectConfiguration = (input: {
       checks,
       workflows: { allowed: [...(config.workflows?.allowed ?? [])] },
       execution: { defaultProfile: config.execution.defaultProfile.trim() },
-      sourcePath: sourceCanonical._tag === "Some" ? sourceCanonical.value : input.sourcePath,
+      sourcePath: sourceCanonical ?? input.sourcePath,
       contentDigest: digest,
     };
   });
@@ -560,8 +737,27 @@ export const loadProjectConfiguration = (repositoryRoot: string) =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
-    const sourcePath = path.join(repositoryRoot, PROJECT_CONFIG_RELATIVE_PATH);
-    const contents = yield* fs.readFileString(sourcePath).pipe(
+    const canonicalRepository = yield* fs.realPath(repositoryRoot).pipe(
+      Effect.mapError(
+        (cause) =>
+          new ProjectConfigError({
+            sourcePath: path.join(repositoryRoot, PROJECT_CONFIG_RELATIVE_PATH),
+            issues: [
+              {
+                code: cause.reason._tag === "NotFound" ? "path_missing" : "read_failed",
+                path: "repositoryRoot",
+                message:
+                  cause.reason._tag === "NotFound"
+                    ? "The registered repository root does not exist."
+                    : "The registered repository root could not be inspected.",
+              },
+            ],
+            message: "Project configuration could not be loaded.",
+          }),
+      ),
+    );
+    const sourcePath = path.join(canonicalRepository, PROJECT_CONFIG_RELATIVE_PATH);
+    const sourceCanonical = yield* fs.realPath(sourcePath).pipe(
       Effect.mapError(
         (cause) =>
           new ProjectConfigError({
@@ -573,12 +769,46 @@ export const loadProjectConfiguration = (repositoryRoot: string) =>
                 message:
                   cause.reason._tag === "NotFound"
                     ? "Project configuration file does not exist."
-                    : "Project configuration file could not be read.",
+                    : "Project configuration file could not be inspected.",
               },
             ],
             message: `Project configuration at '${sourcePath}' could not be loaded.`,
           }),
       ),
     );
-    return yield* resolveProjectConfiguration({ repositoryRoot, sourcePath, contents });
+    const relativeSource = toPosix(path.relative(canonicalRepository, sourceCanonical));
+    if (
+      relativeSource.startsWith("../") ||
+      relativeSource === ".." ||
+      path.isAbsolute(relativeSource)
+    ) {
+      return yield* failConfig(sourcePath, [
+        {
+          code: "path_symlink_escape",
+          path: "$",
+          message: "Project configuration resolves outside the registered repository.",
+        },
+      ]);
+    }
+    const contents = yield* fs.readFileString(sourceCanonical).pipe(
+      Effect.mapError(
+        () =>
+          new ProjectConfigError({
+            sourcePath,
+            issues: [
+              {
+                code: "read_failed",
+                path: "$",
+                message: "Project configuration file could not be read.",
+              },
+            ],
+            message: `Project configuration at '${sourcePath}' could not be loaded.`,
+          }),
+      ),
+    );
+    return yield* resolveProjectConfiguration({
+      repositoryRoot: canonicalRepository,
+      sourcePath: sourceCanonical,
+      contents,
+    });
   });

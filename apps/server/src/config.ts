@@ -142,9 +142,7 @@ export const ensureServerDirectories = Effect.fn(function* (derivedPaths: Server
     path.dirname(derivedPaths.anonymousIdPath),
     path.dirname(derivedPaths.serverRuntimeStatePath),
   ]);
-  yield* Effect.forEach(directories, StatePermissions.ensurePrivateDirectory, {
-    concurrency: "unbounded",
-  });
+  yield* Effect.forEach(directories, StatePermissions.ensurePrivateDirectory);
 });
 
 const makeTest = Effect.fn("ServerConfig.makeTest")(function* (
@@ -194,7 +192,14 @@ export const layerTest = (cwd: string, baseDirOrPrefix: string | { readonly pref
     ServerConfig,
     makeTest(cwd, baseDirOrPrefix).pipe(
       Effect.provideService(StatePermissions.StatePermissionEnforcer, {
-        ensurePathMode: () => Effect.void,
+        ensurePathMode: (input) =>
+          input.createDirectory
+            ? FileSystem.FileSystem.pipe(
+                Effect.flatMap((fs) =>
+                  fs.makeDirectory(input.path, { recursive: true, mode: input.mode }),
+                ),
+              )
+            : Effect.void,
       }),
     ),
   );

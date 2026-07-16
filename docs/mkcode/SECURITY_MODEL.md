@@ -62,14 +62,17 @@ repository write operation.
 On Linux, the server explicitly applies mode `0700` to each server-owned state
 directory and mode `0600` to the project-registration store and its atomic-write
 temporary file. Existing broader registration-file permissions are narrowed on
-read or rewrite when the server can do so as the current owner. The permission
-helper rejects symbolic-link paths before `chmod` and never recursively changes
-registered repositories or unrelated directories. This is host hardening, not
-a portable access-control abstraction; equivalent Windows behavior has not been
-verified.
+read or rewrite when the server can do so as the current owner. Linux directory
+creation and permission correction traverse path components through pinned
+`/proc/self/fd` descriptors, reject symbolic-link components, and stop before
+creating descendants outside managed state. The helper never recursively
+changes registered repositories or unrelated directories. This assumes procfs
+is mounted and is host hardening, not a portable access-control abstraction;
+non-Linux behavior has not received equivalent verification.
 
-Artifact and worktree paths may not exist at validation time and therefore have
-lexical containment only. A future command/workspace implementation must repeat
+Artifact and worktree paths may not exist at validation time. The resolver
+canonicalizes their deepest existing ancestor and rejects escapes and invalid
+ancestor types, but a future command/workspace implementation must repeat
 canonical parent/final-path checks at the moment of creation or use. Structured
 commands can still explicitly name a shell or dangerous executable, so the
 future runner must enforce executable, argument, network, credential, output,

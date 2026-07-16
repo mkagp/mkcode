@@ -104,7 +104,7 @@ requested TypeScript example.
 | `project.id`               | Required stable lowercase kebab-case ID, at most 64 characters. It cannot change during revalidation.                                          |
 | `project.name`             | Required non-empty display name.                                                                                                               |
 | `project.description`      | Optional text.                                                                                                                                 |
-| `repository.baseBranch`    | Required non-empty branch/reference token.                                                                                                     |
+| `repository.baseBranch`    | Required Git-valid branch reference; invalid separators, `..`, `@{`, `.lock` components, and other Git-invalid forms are rejected.             |
 | `repository.worktreeRoot`  | Optional repository-relative path; defaults to `.mkcode/worktrees`. This phase resolves but never creates it.                                  |
 | `repository.contextFiles`  | Optional ordered repository-relative file references; each must exist and remain inside the repository after symlink resolution.               |
 | `setup`                    | Optional ordered command array; defaults to `[]`.                                                                                              |
@@ -131,9 +131,13 @@ Resolution canonicalizes the operator-supplied repository root with `realPath`.
 Working directories and existing context files are checked both lexically and
 after `realPath`, so `..`, absolute paths, and symlinks that resolve outside the
 repository fail. The configuration file itself must also resolve inside the
-registered repository. Artifact and worktree paths may not exist yet, so they
-receive lexical containment checks; a future creator/runner must re-check their
-parents and final paths at use time.
+registered repository before its contents are read. Artifact and worktree paths
+may not exist yet. Resolution checks them lexically, canonicalizes their deepest
+existing ancestor, and rejects symlink escapes or a non-directory ancestor. An
+existing worktree root must itself be a directory. A future creator/runner must
+still re-check parents and final paths at use time because the filesystem can
+change after the snapshot. Filesystem validation for configuration-controlled
+arrays is capped at eight concurrent operations.
 
 The parser preserves executable and argument boundaries. It does not expand
 variables, interpolate shell syntax, resolve secrets, inspect an executable on
@@ -174,10 +178,12 @@ versioned, atomically replaced JSON file owned only by
 On the currently verified Linux deployment, server-owned state directories are
 created or narrowed to mode `0700`. The registration store and its atomic-write
 temporary file are created or narrowed to `0600`; replacement writes restore
-that final mode. Permission enforcement checks the exact owned path and rejects
-symbolic links rather than applying `chmod` through them. It does not recursively
-change parent directories, registered repositories, or unrelated paths. Windows
-permission semantics remain unverified.
+that final mode. Permission enforcement traverses Linux paths component by
+component through pinned directory descriptors, rejects symbolic links before
+creating or changing descendants, and does not recursively change parent
+directories, registered repositories, or unrelated paths. This requires the
+normal Linux `/proc/self/fd` interface. Non-Linux permission and symlink
+semantics remain unverified.
 
 A registration records project ID, canonical absolute repository path,
 enabled/disabled state, optional display override, added/last-validated times,
@@ -198,7 +204,8 @@ in order: present, directory, and Git repository. It reports
 structured current validation issue. Only a valid Git repository can proceed to
 the existing configuration `file_missing` result. `list` and `read` remain safe
 and continue to expose the historical snapshot while the current status is
-invalid; restoring the path permits normal revalidation.
+invalid; restoring the path permits normal revalidation. Revalidation also
+rejects a stored canonical repository path that has been replaced by a symlink.
 
 Authenticated WebSocket methods are:
 

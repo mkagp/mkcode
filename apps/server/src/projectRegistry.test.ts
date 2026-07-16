@@ -249,6 +249,30 @@ describe("project registry", () => {
     ),
   );
 
+  it.effect("rejects a registered repository replaced by a symlink", () =>
+    withRegistry(
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const root = yield* makeRepository();
+        const replacement = yield* makeRepository();
+        const moved = `${root}-moved`;
+        const registry = yield* ProjectRegistryModule.ProjectRegistry;
+        const initial = yield* registry.register({ repositoryPath: root });
+        yield* fs.rename(root, moved);
+        yield* fs.symlink(replacement, root);
+
+        const unavailable = yield* registry.validate("registered-project");
+        assert.equal(unavailable.validationStatus, "invalid");
+        assert.equal(unavailable.validationErrors[0]?.code, "path_symlink_escape");
+        assert.equal(unavailable.configurationDigest, initial.configurationDigest);
+
+        yield* fs.remove(root);
+        yield* fs.rename(moved, root);
+        assert.equal((yield* registry.validate("registered-project")).validationStatus, "valid");
+      }),
+    ),
+  );
+
   it.effect("reports a missing configuration only after confirming the repository is valid", () =>
     withRegistry(
       Effect.gen(function* () {
@@ -316,6 +340,31 @@ describe("project registry", () => {
       }).pipe(Effect.provide(makeRegistryLayer(baseDir)));
       assert.equal(loaded.repositoryPath, root);
       assert.equal((yield* fs.stat(paths.projectRegistrationsPath)).mode & 0o777, 0o600);
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("rejects an empty existing registration store as invalid", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const baseDir = yield* fs.makeTempDirectoryScoped({
+        prefix: "mkcode-project-registry-empty-store-",
+      });
+      const paths = yield* ServerConfig.deriveServerPaths(baseDir, undefined);
+      yield* fs.makeDirectory(paths.stateDir, { recursive: true });
+      yield* fs.writeFileString(paths.projectRegistrationsPath, "\n");
+
+      const error = yield* Effect.flip(
+        Effect.gen(function* () {
+          const registry = yield* ProjectRegistryModule.ProjectRegistry;
+          return yield* registry.list;
+        }).pipe(
+          Effect.provide(makeRegistryLayer(baseDir)),
+          Effect.catchTags({ PlatformError: (cause) => Effect.die(cause) }),
+        ),
+      );
+
+      assert.equal(error.failure, "persistence_failed");
+      assert.equal(yield* fs.readFileString(paths.projectRegistrationsPath), "\n");
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
 });

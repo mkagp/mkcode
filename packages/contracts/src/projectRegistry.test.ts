@@ -28,7 +28,9 @@ it.effect("project registration contracts serialize only safe configuration refe
           workingDirectory: ".",
           resolvedWorkingDirectory: "/repos/safe-project",
           timeoutSeconds: 300,
-          environment: [{ name: "NPM_TOKEN", source: "NPM_TOKEN" }],
+          environment: [
+            { name: "NPM_TOKEN", source: "NPM_TOKEN", value: "must-not-survive-decoding" },
+          ],
           artifacts: [],
         },
       ],

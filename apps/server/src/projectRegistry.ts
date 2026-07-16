@@ -38,9 +38,6 @@ const encodeStore = Schema.encodeUnknownEffect(Schema.fromJsonString(ProjectRegi
 
 const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
 
-const registrationError = (input: ConstructorParameters<typeof ProjectRegistrationError>[0]) =>
-  new ProjectRegistrationError(input);
-
 export class ProjectRegistry extends Context.Service<
   ProjectRegistry,
   {
@@ -78,12 +75,14 @@ export const make = Effect.gen(function* () {
 
   const readStore = Effect.fn("ProjectRegistry.readStore")(function* () {
     yield* ensurePrivateFile(config.projectRegistrationsPath).pipe(
-      Effect.mapError(() =>
-        registrationError({
-          failure: "persistence_failed",
-          message: "Could not secure the project registration store.",
-          validationErrors: [],
-        }),
+      Effect.provideService(FileSystem.FileSystem, fs),
+      Effect.mapError(
+        () =>
+          new ProjectRegistrationError({
+            failure: "persistence_failed",
+            message: "Could not secure the project registration store.",
+            validationErrors: [],
+          }),
       ),
     );
     const raw = yield* fs.readFileString(config.projectRegistrationsPath).pipe(
@@ -92,7 +91,7 @@ export const make = Effect.gen(function* () {
           cause.reason._tag === "NotFound"
             ? Effect.succeed(Option.none<string>())
             : Effect.fail(
-                registrationError({
+                new ProjectRegistrationError({
                   failure: "persistence_failed",
                   message: "Could not read the project registration store.",
                   validationErrors: [],
@@ -101,16 +100,17 @@ export const make = Effect.gen(function* () {
         onSuccess: (value) => Effect.succeed(Option.some(value)),
       }),
     );
-    if (Option.isNone(raw) || raw.value.trim().length === 0) {
+    if (Option.isNone(raw)) {
       return { version: 1 as const, projects: [] };
     }
     return yield* decodeStore(raw.value).pipe(
-      Effect.mapError(() =>
-        registrationError({
-          failure: "persistence_failed",
-          message: "The project registration store is invalid.",
-          validationErrors: [],
-        }),
+      Effect.mapError(
+        () =>
+          new ProjectRegistrationError({
+            failure: "persistence_failed",
+            message: "The project registration store is invalid.",
+            validationErrors: [],
+          }),
       ),
     );
   });
@@ -124,12 +124,13 @@ export const make = Effect.gen(function* () {
         left.projectId.localeCompare(right.projectId),
       ),
     }).pipe(
-      Effect.mapError(() =>
-        registrationError({
-          failure: "persistence_failed",
-          message: "Could not serialize the project registration store.",
-          validationErrors: [],
-        }),
+      Effect.mapError(
+        () =>
+          new ProjectRegistrationError({
+            failure: "persistence_failed",
+            message: "Could not serialize the project registration store.",
+            validationErrors: [],
+          }),
       ),
     );
     yield* writeFileStringAtomically({
@@ -139,12 +140,13 @@ export const make = Effect.gen(function* () {
     }).pipe(
       Effect.provideService(FileSystem.FileSystem, fs),
       Effect.provideService(Path.Path, path),
-      Effect.mapError(() =>
-        registrationError({
-          failure: "persistence_failed",
-          message: "Could not persist project registrations.",
-          validationErrors: [],
-        }),
+      Effect.mapError(
+        () =>
+          new ProjectRegistrationError({
+            failure: "persistence_failed",
+            message: "Could not persist project registrations.",
+            validationErrors: [],
+          }),
       ),
     );
   });
@@ -154,7 +156,7 @@ export const make = Effect.gen(function* () {
   ) {
     const requestedPath = repositoryPath.trim();
     if (!path.isAbsolute(requestedPath)) {
-      return yield* registrationError({
+      return yield* new ProjectRegistrationError({
         failure: "repository_not_found",
         message: "Project registration requires an absolute local repository path.",
         repositoryPath: requestedPath,
@@ -162,27 +164,29 @@ export const make = Effect.gen(function* () {
       });
     }
     const canonical = yield* fs.realPath(requestedPath).pipe(
-      Effect.mapError(() =>
-        registrationError({
-          failure: "repository_not_found",
-          message: "The registered repository path does not exist.",
-          repositoryPath: requestedPath,
-          validationErrors: [],
-        }),
+      Effect.mapError(
+        () =>
+          new ProjectRegistrationError({
+            failure: "repository_not_found",
+            message: "The registered repository path does not exist.",
+            repositoryPath: requestedPath,
+            validationErrors: [],
+          }),
       ),
     );
     const info = yield* fs.stat(canonical).pipe(
-      Effect.mapError(() =>
-        registrationError({
-          failure: "repository_not_found",
-          message: "The registered repository path could not be inspected.",
-          repositoryPath: canonical,
-          validationErrors: [],
-        }),
+      Effect.mapError(
+        () =>
+          new ProjectRegistrationError({
+            failure: "repository_not_found",
+            message: "The registered repository path could not be inspected.",
+            repositoryPath: canonical,
+            validationErrors: [],
+          }),
       ),
     );
     if (info.type !== "Directory") {
-      return yield* registrationError({
+      return yield* new ProjectRegistrationError({
         failure: "repository_not_directory",
         message: "The registered repository path must be a directory.",
         repositoryPath: canonical,
@@ -195,7 +199,7 @@ export const make = Effect.gen(function* () {
       Option.isNone(gitInfo) ||
       (gitInfo.value.type !== "Directory" && gitInfo.value.type !== "File")
     ) {
-      return yield* registrationError({
+      return yield* new ProjectRegistrationError({
         failure: "repository_not_git",
         message: "The registered directory is not a Git repository.",
         repositoryPath: canonical,
@@ -209,7 +213,34 @@ export const make = Effect.gen(function* () {
 
   const inspectRegisteredRepository = Effect.fn("ProjectRegistry.inspectRegisteredRepository")(
     function* (repositoryPath: string): Effect.fn.Return<void, ProjectConfigIssue> {
-      const repositoryInfo = yield* Effect.result(fs.stat(repositoryPath));
+      const canonicalResult = yield* Effect.result(fs.realPath(repositoryPath));
+      if (canonicalResult._tag === "Failure") {
+        return yield* Effect.fail(
+          projectConfigIssue({
+            code:
+              canonicalResult.failure.reason._tag === "NotFound"
+                ? "repository_not_found"
+                : "read_failed",
+            path: "repositoryPath",
+            message:
+              canonicalResult.failure.reason._tag === "NotFound"
+                ? "The registered repository path is unavailable."
+                : "The registered repository path could not be inspected.",
+          }),
+        );
+      }
+      if (canonicalResult.success !== repositoryPath) {
+        return yield* Effect.fail(
+          projectConfigIssue({
+            code: "path_symlink_escape",
+            path: "repositoryPath",
+            message:
+              "The registered repository path no longer resolves to its registered location.",
+          }),
+        );
+      }
+
+      const repositoryInfo = yield* Effect.result(fs.stat(canonicalResult.success));
       if (repositoryInfo._tag === "Failure") {
         return yield* Effect.fail(
           projectConfigIssue({
@@ -235,7 +266,7 @@ export const make = Effect.gen(function* () {
         );
       }
 
-      const gitInfo = yield* Effect.result(fs.stat(path.join(repositoryPath, ".git")));
+      const gitInfo = yield* Effect.result(fs.stat(path.join(canonicalResult.success, ".git")));
       if (gitInfo._tag === "Failure") {
         return yield* Effect.fail(
           projectConfigIssue({
@@ -287,7 +318,7 @@ export const make = Effect.gen(function* () {
     return project
       ? Effect.succeed(project)
       : Effect.fail(
-          registrationError({
+          new ProjectRegistrationError({
             failure: "project_not_found",
             message: `Registered project '${projectId}' was not found.`,
             projectId,
@@ -309,13 +340,14 @@ export const make = Effect.gen(function* () {
       Effect.gen(function* () {
         const repositoryPath = yield* canonicalRepository(input.repositoryPath);
         const snapshot = yield* loadConfiguration(repositoryPath).pipe(
-          Effect.mapError((error) =>
-            registrationError({
-              failure: "configuration_invalid",
-              message: "The repository project configuration is invalid.",
-              repositoryPath,
-              validationErrors: [...error.issues],
-            }),
+          Effect.mapError(
+            (error) =>
+              new ProjectRegistrationError({
+                failure: "configuration_invalid",
+                message: "The repository project configuration is invalid.",
+                repositoryPath,
+                validationErrors: [...error.issues],
+              }),
           ),
         );
         const store = yield* readStore();
@@ -324,7 +356,7 @@ export const make = Effect.gen(function* () {
             project.projectId === snapshot.project.id && project.repositoryPath !== repositoryPath,
         );
         if (idConflict) {
-          return yield* registrationError({
+          return yield* new ProjectRegistrationError({
             failure: "project_id_conflict",
             message: `Project id '${snapshot.project.id}' is already registered to another repository.`,
             projectId: snapshot.project.id,
@@ -337,7 +369,7 @@ export const make = Effect.gen(function* () {
             project.repositoryPath === repositoryPath && project.projectId !== snapshot.project.id,
         );
         if (repositoryConflict) {
-          return yield* registrationError({
+          return yield* new ProjectRegistrationError({
             failure: "repository_conflict",
             message: "This repository is already registered with a different stable project id.",
             projectId: repositoryConflict.projectId,

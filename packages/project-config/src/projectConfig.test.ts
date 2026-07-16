@@ -3,6 +3,9 @@ import { assert, describe, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
+import * as PlatformError from "effect/PlatformError";
+import * as Schema from "effect/Schema";
+import * as TestClock from "effect/testing/TestClock";
 
 import {
   loadProjectConfiguration,
@@ -10,6 +13,9 @@ import {
   PROJECT_CONFIG_RELATIVE_PATH,
   resolveProjectConfiguration,
 } from "./projectConfig.ts";
+import { ProjectConfigurationFile } from "./schema.ts";
+
+const decodeProjectConfigurationFile = Schema.decodeUnknownEffect(ProjectConfigurationFile);
 
 const validConfiguration = `version: 1
 project:
@@ -73,7 +79,9 @@ const resolveFixture = (contents = validConfiguration) =>
 const expectIssue = (contents: string, code: string) =>
   Effect.gen(function* () {
     const error = yield* Effect.flip(
-      resolveFixture(contents).pipe(Effect.catchTag("PlatformError", (cause) => Effect.die(cause))),
+      resolveFixture(contents).pipe(
+        Effect.catchTags({ PlatformError: (cause) => Effect.die(cause) }),
+      ),
     );
     assert.isTrue(error.issues.some((issue) => issue.code === code));
   });
@@ -81,7 +89,9 @@ const expectIssue = (contents: string, code: string) =>
 const expectIssueAt = (contents: string, code: string, path: string) =>
   Effect.gen(function* () {
     const error = yield* Effect.flip(
-      resolveFixture(contents).pipe(Effect.catchTag("PlatformError", (cause) => Effect.die(cause))),
+      resolveFixture(contents).pipe(
+        Effect.catchTags({ PlatformError: (cause) => Effect.die(cause) }),
+      ),
     );
     assert.isTrue(error.issues.some((issue) => issue.code === code && issue.path === path));
   });
@@ -152,6 +162,44 @@ describe("project configuration", () => {
         "schema_invalid",
         "repository.baseBranch",
       ),
+    ),
+  );
+
+  it.effect("rejects Git-invalid base branch references", () =>
+    withNode(
+      Effect.gen(function* () {
+        for (const baseBranch of ["foo..bar", "foo/", "foo//bar"]) {
+          yield* expectIssueAt(
+            validConfiguration.replace("baseBranch: main", `baseBranch: ${baseBranch}`),
+            "invalid_reference",
+            "repository.baseBranch",
+          );
+        }
+      }),
+    ),
+  );
+
+  it.effect("exports a version 1-only project configuration schema", () =>
+    withNode(
+      Effect.gen(function* () {
+        const valid = yield* decodeProjectConfigurationFile({
+          version: 1,
+          project: { id: "schema-version", name: "Schema Version" },
+          repository: { baseBranch: "main" },
+          execution: { defaultProfile: "coding-workhorse" },
+        });
+        assert.equal(valid.version, 1);
+
+        const decoded = yield* Effect.flip(
+          decodeProjectConfigurationFile({
+            version: 999,
+            project: { id: "schema-version", name: "Schema Version" },
+            repository: { baseBranch: "main" },
+            execution: { defaultProfile: "coding-workhorse" },
+          }),
+        );
+        assert.isDefined(decoded);
+      }),
     ),
   );
 
@@ -335,5 +383,240 @@ describe("project configuration", () => {
         assert.isTrue(error.issues.some((issue) => issue.code === "path_symlink_escape"));
       }),
     ),
+  );
+
+  it.effect(
+    "rejects an artifact path with an existing symlink ancestor outside the repository",
+    () =>
+      withNode(
+        Effect.gen(function* () {
+          const fs = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const contents = validConfiguration.replace(
+            "timeoutSeconds: 900",
+            "timeoutSeconds: 900\n    artifacts:\n      - path: generated/report.json",
+          );
+          const repository = yield* makeRepository(contents);
+          const outside = yield* fs.makeTempDirectoryScoped({ prefix: "mkcode-artifact-outside-" });
+          yield* fs.symlink(outside, path.join(repository.root, "generated"));
+
+          const error = yield* Effect.flip(
+            resolveProjectConfiguration({
+              repositoryRoot: repository.root,
+              sourcePath: repository.sourcePath,
+              contents,
+            }),
+          );
+
+          assert.isTrue(
+            error.issues.some(
+              (issue) => issue.code === "path_symlink_escape" && issue.path.includes("artifacts"),
+            ),
+          );
+        }),
+      ),
+  );
+
+  it.effect("rejects an artifact path with a dangling symlink ancestor", () =>
+    withNode(
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const contents = validConfiguration.replace(
+          "timeoutSeconds: 900",
+          "timeoutSeconds: 900\n    artifacts:\n      - path: linked/report.json",
+        );
+        const repository = yield* makeRepository(contents);
+        const outside = yield* fs.makeTempDirectoryScoped({ prefix: "mkcode-artifact-dangling-" });
+        yield* fs.symlink(path.join(outside, "not-created"), path.join(repository.root, "linked"));
+
+        const error = yield* Effect.flip(
+          resolveProjectConfiguration({
+            repositoryRoot: repository.root,
+            sourcePath: repository.sourcePath,
+            contents,
+          }),
+        );
+
+        assert.isTrue(
+          error.issues.some(
+            (issue) => issue.code === "path_symlink_escape" && issue.path.includes("artifacts"),
+          ),
+        );
+      }),
+    ),
+  );
+
+  it.effect(
+    "rejects a worktree root with an existing symlink ancestor outside the repository",
+    () =>
+      withNode(
+        Effect.gen(function* () {
+          const fs = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const contents = validConfiguration.replace(
+            "baseBranch: main",
+            "baseBranch: main\n  worktreeRoot: linked/worktrees",
+          );
+          const repository = yield* makeRepository(contents);
+          const outside = yield* fs.makeTempDirectoryScoped({ prefix: "mkcode-worktree-outside-" });
+          yield* fs.symlink(outside, path.join(repository.root, "linked"));
+
+          const error = yield* Effect.flip(
+            resolveProjectConfiguration({
+              repositoryRoot: repository.root,
+              sourcePath: repository.sourcePath,
+              contents,
+            }),
+          );
+
+          assert.isTrue(
+            error.issues.some(
+              (issue) =>
+                issue.code === "path_symlink_escape" && issue.path === "repository.worktreeRoot",
+            ),
+          );
+        }),
+      ),
+  );
+
+  it.effect("rejects an existing non-directory worktree root", () =>
+    withNode(
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const contents = validConfiguration.replace(
+          "baseBranch: main",
+          "baseBranch: main\n  worktreeRoot: worktree-file",
+        );
+        const repository = yield* makeRepository(contents);
+        yield* fs.writeFileString(path.join(repository.root, "worktree-file"), "not a directory");
+
+        const error = yield* Effect.flip(
+          resolveProjectConfiguration({
+            repositoryRoot: repository.root,
+            sourcePath: repository.sourcePath,
+            contents,
+          }),
+        );
+
+        assert.isTrue(
+          error.issues.some(
+            (issue) =>
+              issue.code === "path_not_directory" && issue.path === "repository.worktreeRoot",
+          ),
+        );
+      }),
+    ),
+  );
+
+  it.effect("checks configuration containment before reading a symlink target", () =>
+    withNode(
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const repository = yield* makeRepository();
+        const outside = yield* fs.makeTempDirectoryScoped({ prefix: "mkcode-config-outside-" });
+        const outsideConfig = path.join(outside, "outside.yaml");
+        yield* fs.writeFileString(outsideConfig, "version: [malformed\n");
+        yield* fs.remove(repository.sourcePath);
+        yield* fs.symlink(outsideConfig, repository.sourcePath);
+
+        const error = yield* Effect.flip(loadProjectConfiguration(repository.root));
+
+        assert.equal(error.issues[0]?.code, "path_symlink_escape");
+        assert.isFalse(error.issues.some((issue) => issue.code === "yaml_malformed"));
+      }),
+    ),
+  );
+
+  it.effect("reports permission failures as read failures rather than missing paths", () =>
+    withNode(
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const contents = validConfiguration.replace(
+          "baseBranch: main",
+          "baseBranch: main\n  contextFiles: [blocked/context.md]",
+        );
+        const repository = yield* makeRepository(contents);
+        const blocked = path.join(repository.root, "blocked");
+        const blockedContext = path.join(blocked, "context.md");
+        yield* fs.makeDirectory(blocked);
+        yield* fs.writeFileString(blockedContext, "context");
+        const permissionDeniedFileSystem = {
+          ...fs,
+          realPath: (target) =>
+            target === blockedContext
+              ? Effect.fail(
+                  PlatformError.systemError({
+                    _tag: "PermissionDenied",
+                    module: "FileSystem",
+                    method: "realPath",
+                    pathOrDescriptor: target,
+                    description: "Test PermissionDenied realPath failure.",
+                  }),
+                )
+              : fs.realPath(target),
+        } satisfies FileSystem.FileSystem;
+
+        const error = yield* Effect.flip(
+          resolveProjectConfiguration({
+            repositoryRoot: repository.root,
+            sourcePath: repository.sourcePath,
+            contents,
+          }).pipe(Effect.provideService(FileSystem.FileSystem, permissionDeniedFileSystem)),
+        );
+
+        assert.isTrue(
+          error.issues.some(
+            (issue) => issue.code === "read_failed" && issue.path === "repository.contextFiles[0]",
+          ),
+        );
+      }),
+    ),
+  );
+
+  it.effect("bounds configuration-controlled filesystem validation concurrency", () =>
+    withNode(
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const contextFiles = Array.from({ length: 24 }, (_, index) => `context-${index}.md`);
+        const contents = validConfiguration.replace(
+          "baseBranch: main",
+          `baseBranch: main\n  contextFiles: [${contextFiles.join(", ")}]`,
+        );
+        const repository = yield* makeRepository(contents);
+        for (const contextFile of contextFiles) {
+          yield* fs.writeFileString(path.join(repository.root, contextFile), contextFile);
+        }
+        let active = 0;
+        let maximum = 0;
+        const observingFileSystem = {
+          ...fs,
+          realPath: (target) =>
+            Effect.acquireUseRelease(
+              Effect.sync(() => {
+                active += 1;
+                maximum = Math.max(maximum, active);
+              }),
+              () => Effect.sleep("5 millis").pipe(Effect.flatMap(() => fs.realPath(target))),
+              () =>
+                Effect.sync(() => {
+                  active -= 1;
+                }),
+            ),
+        } satisfies FileSystem.FileSystem;
+
+        yield* resolveProjectConfiguration({
+          repositoryRoot: repository.root,
+          sourcePath: repository.sourcePath,
+          contents,
+        }).pipe(Effect.provideService(FileSystem.FileSystem, observingFileSystem));
+
+        assert.isAtMost(maximum, 8);
+      }),
+    ).pipe(TestClock.withLive),
   );
 });

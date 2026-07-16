@@ -38,7 +38,7 @@ export const ProjectCheckDefinition = Schema.Struct({
 export type ProjectCheckDefinition = typeof ProjectCheckDefinition.Type;
 
 export const ProjectConfigurationFile = Schema.Struct({
-  version: Schema.Number,
+  version: Schema.Literal(1),
   project: Schema.Struct({
     id: Schema.String,
     name: Schema.String,
