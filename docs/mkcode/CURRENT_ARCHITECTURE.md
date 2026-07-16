@@ -1,7 +1,8 @@
 # Current architecture
 
 This document describes the verified T3-derived architecture plus landed MK Code
-fork-safety, project-registration, and factory-worker skeleton additions. The fixed derivation baseline is
+fork-safety, project-registration, factory-worker, and deterministic-command
+additions. The fixed derivation baseline is
 `ecb35f75839925dd1ac6f854efeef5c9e291d11b`; current code has advanced beyond
 that commit. Planned factory components are documented separately.
 
@@ -107,17 +108,21 @@ path or asks the worker to reread it.
 `config.ts` defaults to `127.0.0.1`, rejects an unsafe bind without an explicit
 override, requires `MKCODE_FACTORY_TOKEN`, and derives `factory.sqlite` from its
 own state directory. `runtime.ts` opens and reconciles the engine before
-listening, polls durable jobs, and drains current simulated work during graceful
+listening, polls durable jobs, dispatches simulation or declared-command work,
+and bounds current work during graceful
 shutdown up to a configured grace deadline. Simulation handlers receive an
 abort signal and must settle before a lease-safe deadline; the worker never
 allows an unbounded handler wait to hold the HTTP listener and database open.
 `MKCODE_FACTORY_SHUTDOWN_GRACE_MS` may override the default five-second shutdown
 grace period.
 
-`api.ts` authenticates all routes with a constant-time comparison of a separate
+`commandWorker.ts` composes the workflow engine with
+`@mkcode/command-runner`. It resolves the CommandRun created from the immutable
+WorkflowRun snapshot, records launch fences, renews the job lease, and persists
+the deterministic result. `api.ts` authenticates all routes with a constant-time comparison of a separate
 server-to-worker bearer credential. It exposes health, workflow create/list/read/
-cancel, approval resolution, and cursor event retrieval. The API never accepts
-an executable or mutable project-registration path.
+cancel, command read/output/cancel, approval resolution, and cursor event
+retrieval. No route accepts an executable or mutable project-registration path.
 
 ### `apps/web`
 
@@ -185,6 +190,11 @@ requires a staged separation from generic local auth and connection behavior.
   cancellation, approvals, cursor events, and reconciliation
   (`src/workflowEngine.ts`). It imports no server, browser, provider, Git, or
   command-launch implementation.
+- `packages/command-runner`: structured direct process invocation, canonical
+  working-directory containment, minimal environment construction, streaming
+  redaction, bounded `0600` output artifacts, timeout/cancellation, and the
+  `LocalProcessHost`. It imports no workflow persistence, UI, provider, Git, or
+  Herdr implementation.
 - `packages/shared`: runtime utilities shared by server and clients. It uses
   explicit subpath exports rather than a barrel. It includes project-script,
   Git, QR, platform, and general utilities.
@@ -356,9 +366,23 @@ idempotent; cancellation atomically prevents further scheduling.
 Startup reconciliation requeues expired leases, cancels jobs for cancelled
 runs, repairs queued stages missing jobs and review stages missing approvals,
 and marks ambiguous completed-job/uncommitted-transition state as
-`operator_attention` rather than fabricating success. Events use a SQLite
+`operator_attention` rather than fabricating success. Migration 2
+(`packages/workflow-engine/src/migrations/002_command_runs.ts`) adds
+`command_runs`, its recovery indexes, and the selected validation-check
+reference on WorkflowRun without modifying migration 1.
+
+When a selected check reaches `validating`, the same transaction creates its
+CommandRun, `command.execute` JobIntent, and `command.scheduled` event. The
+worker invokes the snapshotted executable and ordered arguments with
+`shell:false`; exit zero advances to durable human review, while nonzero,
+timeout, spawn failure, or signal termination fails the run with explicit
+evidence. Output is redacted before it is written under
+`<factory-state>/command-output`, and API pages are authenticated and bounded.
+Cancellation interrupts the Linux process group, persists pre-cancel output,
+and cannot be overwritten by a later child exit. Events use a SQLite
 autoincrement cursor and replay after restart. Current simulation handlers only
-call engine transitions; they do not execute project configuration.
+cover planning and implementing; only the validating stage can execute one
+selected check.
 
 ## Git, worktrees, checkpoints, terminals, and previews
 
@@ -474,6 +498,10 @@ review item, not a finding of noncompliance.
 11. The JSON project-registration store is intentionally single-server and
     atomic but is not a multi-writer store; factory run state must not be added
     to it.
+12. Local process ownership is intentionally process-local. After worker or
+    machine loss, a starting/running command whose identity cannot be proven is
+    marked `operator_attention`; native PID metadata is not sufficient for safe
+    reattachment.
 
 ## Unverified areas
 
@@ -486,3 +514,5 @@ review item, not a finding of noncompliance.
 - Relay deployment and live T3 Connect infrastructure.
 - External signing, Clerk, Cloudflare, PlanetScale, Axiom, APNs, Expo, and
   Discord workflows.
+- Windows process-tree and ACL behavior for deterministic commands; Linux is
+  the verified execution target.

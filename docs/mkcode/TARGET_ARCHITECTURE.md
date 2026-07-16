@@ -110,8 +110,9 @@ jobs and reconciles state before accepting new work after restart.
 
 **Implemented now:** `apps/factory-worker` provides the separate process,
 loopback API, credential check, polling simulation loop, startup reconciliation,
-and graceful shutdown. It deliberately contains no process-launch or repository
-mutation facility.
+graceful shutdown, and one declared-check execution handler. Process launch is
+delegated to `packages/command-runner`; the worker still contains no worktree,
+Git, agent, provider, or integration launcher.
 
 ### Durable workflow engine
 
@@ -125,6 +126,11 @@ stage sequence, transactional JobIntents, claims/leases, capped injectable
 retries, cancellation, durable human review, idempotent create/decision paths,
 cursor events, and recovery in separate SQLite. A generalized workflow
 definition language remains deferred.
+
+Migration 2 and the engine now also own durable CommandRuns, command lifecycle
+events, output artifact metadata, selected-check resolution, cancellation
+fences, and conservative local-process recovery. These additions do not give
+the engine permission to spawn a process.
 
 ### Registries
 
@@ -157,12 +163,25 @@ metadata. A later HerdrProcessHost supplies persistent PTYs, raw output, remote
 attachment, manual intervention, and restoration metadata behind the same port.
 Neither host advances workflow state.
 
+**Implemented now:** `packages/command-runner/src/processHost.ts` implements the
+Linux-first local host. It starts direct child processes with no shell and a
+distinct process group, and signals only execution IDs present in its own
+in-memory child map. Restart reattachment remains deliberately unsupported.
+
 ### Deterministic command runner
 
 Executes project-declared executable-plus-argument arrays in an owned Workspace.
 It records environment references, working directory, timeout, cancellation,
 exit code or signal, redacted output, and artifacts. Controller policy maps those
 facts to validation outcomes.
+
+**Implemented now:** a workflow may select one validation check ID at creation.
+The worker resolves that ID from the stored project snapshot, revalidates the
+canonical working directory immediately before launch, supplies a minimal
+allowlisted environment plus declared references, redacts output before
+persistence, and records explicit exit/signal/timeout/cancellation outcomes.
+Setup commands are supported by the snapshot resolver but are not yet scheduled
+by the phase-specific workflow.
 
 ### Workspace manager
 

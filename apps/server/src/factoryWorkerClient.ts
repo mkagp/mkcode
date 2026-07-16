@@ -1,6 +1,8 @@
 // @effect-diagnostics globalTimers:off -- This transport owns a bounded HTTP request deadline.
 import {
   ApprovalResolveRequest,
+  CommandOutputPage,
+  CommandRun,
   EventsListResult,
   FactoryApiError,
   FactoryHealth,
@@ -10,6 +12,8 @@ import {
   WorkflowDetail,
   WorkflowListResult,
   type ApprovalResolveRequest as ApprovalResolveRequestType,
+  type CommandOutputPage as CommandOutputPageType,
+  type CommandRun as CommandRunType,
   type EventsListResult as EventsListResultType,
   type FactoryHealth as FactoryHealthType,
   type WorkflowCancelRequest as WorkflowCancelRequestType,
@@ -25,6 +29,10 @@ const DEFAULT_REQUEST_TIMEOUT_MILLISECONDS = 10_000;
 const MAX_REQUEST_TIMEOUT_MILLISECONDS = 2_147_483_647;
 
 const decodeHealth = Schema.decodeUnknownSync(FactoryHealth, { onExcessProperty: "error" });
+const decodeCommand = Schema.decodeUnknownSync(CommandRun, { onExcessProperty: "error" });
+const decodeCommandOutput = Schema.decodeUnknownSync(CommandOutputPage, {
+  onExcessProperty: "error",
+});
 const decodeCreateResult = Schema.decodeUnknownSync(WorkflowCreateResult, {
   onExcessProperty: "error",
 });
@@ -128,6 +136,38 @@ export class FactoryWorkerClient {
   ): Promise<WorkflowDetailType> {
     return decodeWorkflowDetail(
       await this.#request(`/v1/workflows/${encodeURIComponent(runId)}/cancel`, {
+        method: "POST",
+        body: JSON.stringify(encodeCancel(input)),
+      }),
+    );
+  }
+
+  async readCommand(commandRunId: string): Promise<CommandRunType> {
+    return decodeCommand(await this.#request(`/v1/commands/${encodeURIComponent(commandRunId)}`));
+  }
+
+  async readCommandOutput(input: {
+    readonly commandRunId: string;
+    readonly stream: "stdout" | "stderr";
+    readonly cursor?: number;
+    readonly limit?: number;
+  }): Promise<CommandOutputPageType> {
+    const query = new URLSearchParams({ stream: input.stream });
+    if (input.cursor !== undefined) query.set("cursor", String(input.cursor));
+    if (input.limit !== undefined) query.set("limit", String(input.limit));
+    return decodeCommandOutput(
+      await this.#request(
+        `/v1/commands/${encodeURIComponent(input.commandRunId)}/output?${query.toString()}`,
+      ),
+    );
+  }
+
+  async cancelCommand(
+    commandRunId: string,
+    input: WorkflowCancelRequestType,
+  ): Promise<WorkflowDetailType> {
+    return decodeWorkflowDetail(
+      await this.#request(`/v1/commands/${encodeURIComponent(commandRunId)}/cancel`, {
         method: "POST",
         body: JSON.stringify(encodeCancel(input)),
       }),

@@ -84,11 +84,13 @@ describe("factory control plane", () => {
           source: "manual",
           workflowType: "feature",
           requestedBy: "operator",
+          validationCheckId: "lint",
         }),
       ).pipe(Effect.provideService(ProjectRegistry.ProjectRegistry, registry));
 
       NodeAssert.deepEqual(calls, ["read", "validate", "create"]);
       NodeAssert.equal(forwarded?.projectSnapshot.contentDigest, "fresh-digest");
+      NodeAssert.equal(forwarded?.validationCheckId, "lint");
       NodeAssert.equal(result._tag, "Failure");
       if (result._tag !== "Failure") {
         NodeAssert.fail("Expected workflow creation to fail.");
@@ -139,6 +141,47 @@ describe("factory control plane", () => {
 
       NodeAssert.equal(result._tag, "Failure");
       if (result._tag === "Failure") NodeAssert.equal(result.failure, conflict);
+    }),
+  );
+
+  it.effect("forwards an explicitly empty validation check for contract rejection", () =>
+    Effect.gen(function* () {
+      const stored = registration("fresh-digest");
+      let forwarded: WorkflowCreateRequest | undefined;
+      const registry = ProjectRegistry.ProjectRegistry.of({
+        register: () => Effect.succeed(stored),
+        list: Effect.succeed([stored]),
+        read: () => Effect.succeed(stored),
+        validate: () => Effect.succeed(stored),
+        disable: () => Effect.succeed({ ...stored, enabled: false, validationStatus: "disabled" }),
+        enable: () => Effect.succeed(stored),
+      });
+      const client = {
+        createWorkflow: (input: WorkflowCreateRequest) => {
+          forwarded = input;
+          return Promise.reject(
+            new FactoryWorkerClientError(400, {
+              code: "invalid_request",
+              message: "Request body does not match the factory API contract.",
+            }),
+          );
+        },
+      } as unknown as FactoryWorkerClient;
+
+      yield* Effect.result(
+        createRegisteredProjectWorkflow(client, {
+          projectId: "project-1",
+          idempotencyKey: "request-empty-check",
+          title: "Title",
+          description: "Description",
+          source: "manual",
+          workflowType: "feature",
+          requestedBy: "operator",
+          validationCheckId: "",
+        }),
+      ).pipe(Effect.provideService(ProjectRegistry.ProjectRegistry, registry));
+
+      NodeAssert.equal(forwarded?.validationCheckId, "");
     }),
   );
 

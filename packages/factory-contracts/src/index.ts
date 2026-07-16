@@ -61,6 +61,7 @@ export const WorkflowRun = Schema.Struct({
   cancellationRequestedAt: Schema.optional(Schema.String),
   cancellationRequestedBy: Schema.optional(Schema.String),
   terminalOutcome: Schema.optional(WorkflowTerminalOutcome),
+  validationCheckId: Schema.optional(Schema.String),
   version: NonNegativeInt,
 });
 export type WorkflowRun = typeof WorkflowRun.Type;
@@ -126,6 +127,12 @@ export const JobStatus = Schema.Literals([
 ]);
 export type JobStatus = typeof JobStatus.Type;
 
+export const JobType = Schema.Literals([
+  "simulation.complete-stage",
+  "simulation.request-human-review",
+  "command.execute",
+]);
+export type JobType = typeof JobType.Type;
 export const SimulationJobType = Schema.Literals([
   "simulation.complete-stage",
   "simulation.request-human-review",
@@ -136,7 +143,7 @@ export const JobIntent = Schema.Struct({
   id: Schema.String,
   workflowRunId: Schema.String,
   stageRunId: Schema.String,
-  jobType: SimulationJobType,
+  jobType: JobType,
   payloadVersion: PositiveInt,
   payload: Schema.Record(Schema.String, Schema.Unknown),
   status: JobStatus,
@@ -196,6 +203,120 @@ export const Artifact = Schema.Struct({
 });
 export type Artifact = typeof Artifact.Type;
 
+export const CommandCategory = Schema.Literals(["setup", "check"]);
+export type CommandCategory = typeof CommandCategory.Type;
+
+export const CommandRunStatus = Schema.Literals([
+  "pending",
+  "starting",
+  "running",
+  "cancelling",
+  "passed",
+  "failed",
+  "timed_out",
+  "cancelled",
+  "spawn_failed",
+  "terminated",
+  "operator_attention",
+]);
+export type CommandRunStatus = typeof CommandRunStatus.Type;
+
+export const CommandOutcome = Schema.Literals([
+  "passed",
+  "failed",
+  "timed_out",
+  "cancelled",
+  "spawn_failed",
+  "terminated",
+  "operator_attention",
+]);
+export type CommandOutcome = typeof CommandOutcome.Type;
+
+export const CommandRun = Schema.Struct({
+  id: Schema.String,
+  workflowRunId: Schema.String,
+  stageRunId: Schema.String,
+  attemptId: Schema.optional(Schema.String),
+  commandCategory: CommandCategory,
+  commandId: Schema.String,
+  commandDefinition: Schema.Record(Schema.String, Schema.Unknown),
+  executionRoot: Schema.String,
+  resolvedWorkingDirectory: Schema.String,
+  executable: Schema.String,
+  args: Schema.Array(Schema.String),
+  environmentReferenceNames: Schema.Array(Schema.String),
+  status: CommandRunStatus,
+  createdAt: Schema.String,
+  startedAt: Schema.optional(Schema.String),
+  completedAt: Schema.optional(Schema.String),
+  timeoutDeadline: Schema.optional(Schema.String),
+  exitCode: Schema.optional(Schema.NullOr(Schema.Int)),
+  terminatingSignal: Schema.optional(Schema.NullOr(Schema.String)),
+  timedOut: Schema.Boolean,
+  cancelled: Schema.Boolean,
+  processHostType: Schema.optional(Schema.String),
+  processHostExecutionId: Schema.optional(Schema.String),
+  nativePid: Schema.optional(PositiveInt),
+  stdoutArtifactReference: Schema.optional(Schema.String),
+  stderrArtifactReference: Schema.optional(Schema.String),
+  stdoutDigest: Schema.optional(Schema.String),
+  stderrDigest: Schema.optional(Schema.String),
+  stdoutObservedBytes: NonNegativeInt,
+  stderrObservedBytes: NonNegativeInt,
+  stdoutPersistedBytes: NonNegativeInt,
+  stderrPersistedBytes: NonNegativeInt,
+  stdoutTruncated: Schema.Boolean,
+  stderrTruncated: Schema.Boolean,
+  redactionMetadata: Schema.Record(Schema.String, Schema.Unknown),
+  outcome: Schema.optional(CommandOutcome),
+  failureClassification: Schema.optional(Schema.String),
+  version: PositiveInt,
+});
+export type CommandRun = typeof CommandRun.Type;
+
+export const CommandExecutionCompletion = Schema.Struct({
+  outcome: CommandOutcome,
+  executionId: Schema.String,
+  workingDirectory: Schema.String,
+  processHostType: Schema.String,
+  nativePid: Schema.optional(PositiveInt),
+  startedAt: Schema.optional(Schema.String),
+  completedAt: Schema.String,
+  timeoutDeadline: Schema.optional(Schema.String),
+  exitCode: Schema.NullOr(Schema.Int),
+  signal: Schema.NullOr(Schema.String),
+  timedOut: Schema.Boolean,
+  cancelled: Schema.Boolean,
+  stdout: Schema.Struct({
+    locationReference: Schema.String,
+    digest: Schema.String,
+    observedBytes: NonNegativeInt,
+    persistedBytes: NonNegativeInt,
+    truncated: Schema.Boolean,
+  }),
+  stderr: Schema.Struct({
+    locationReference: Schema.String,
+    digest: Schema.String,
+    observedBytes: NonNegativeInt,
+    persistedBytes: NonNegativeInt,
+    truncated: Schema.Boolean,
+  }),
+  resolvedEnvironmentNames: Schema.Array(Schema.String),
+  redactionCount: NonNegativeInt,
+  spawnErrorCode: Schema.optional(Schema.String),
+});
+export type CommandExecutionCompletion = typeof CommandExecutionCompletion.Type;
+
+export const CommandOutputPage = Schema.Struct({
+  commandRunId: Schema.String,
+  stream: Schema.Literals(["stdout", "stderr"]),
+  data: Schema.String,
+  nextCursor: NonNegativeInt,
+  end: Schema.Boolean,
+  truncated: Schema.Boolean,
+});
+export type CommandOutputPage = typeof CommandOutputPage.Type;
+
 export const WorkflowEvent = Schema.Struct({
   cursor: PositiveInt,
   id: Schema.String,
@@ -220,6 +341,7 @@ export const WorkflowCreateRequest = Schema.Struct({
   workflowType: Schema.String,
   requestedBy: TrimmedNonEmptyString,
   projectSnapshot: ResolvedProjectConfiguration,
+  validationCheckId: Schema.optional(TrimmedNonEmptyString),
 });
 export type WorkflowCreateRequest = typeof WorkflowCreateRequest.Type;
 
@@ -240,6 +362,7 @@ export const WorkflowDetail = Schema.Struct({
   jobs: Schema.Array(JobIntent),
   approvals: Schema.Array(Approval),
   artifacts: Schema.Array(Artifact),
+  commands: Schema.Array(CommandRun),
 });
 export type WorkflowDetail = typeof WorkflowDetail.Type;
 

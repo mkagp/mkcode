@@ -9,9 +9,11 @@ live in `packages/contracts/src/projectRegistry.ts`. The server-owned registry
 and its WebSocket handlers live in `apps/server/src/projectRegistry.ts` and
 `apps/server/src/ws.ts`.
 
-This phase only describes future setup and validation. No code in
+`packages/project-config` still only describes setup and validation. No code in
 `packages/project-config` or the registry service starts processes, executes a
-command, creates a worktree, launches an agent, or advances a workflow.
+command, creates a worktree, launches an agent, or advances a workflow. The
+separate factory worker now consumes an immutable snapshot to execute one
+selected validation check.
 
 ## Configuration hierarchy
 
@@ -139,12 +141,14 @@ still re-check parents and final paths at use time because the filesystem can
 change after the snapshot. Filesystem validation for configuration-controlled
 arrays is capped at eight concurrent operations.
 
-The parser preserves executable and argument boundaries. It does not expand
+The parser and implemented command runner preserve executable and argument
+boundaries. The runner does not expand
 variables, interpolate shell syntax, resolve secrets, inspect an executable on
-`PATH`, or determine that an executable is safe. Naming a shell explicitly is
-still possible data and must be governed by the future command runner's policy.
-Consequently, this parser is a containment and data-validation boundary, not a
-security sandbox.
+`PATH`, or invoke an implicit shell. The worker resolves a setup/check ID only
+from the immutable WorkflowRun snapshot and repeats lexical/realpath containment
+immediately before launch. Naming a shell explicitly remains possible project
+data; a broader executable allow/deny policy is still unresolved. Neither the
+parser nor direct process execution is a security sandbox.
 
 ## Deterministic resolved snapshot
 
@@ -220,13 +224,13 @@ browser CRUD surface.
 
 ## Deliberately deferred
 
-- command execution and executable allow/deny policy;
+- executable allow/deny policy and shell-specific command types;
 - worktree creation or external worktree roots;
 - global/project override precedence and schema migrations beyond rejecting
   unsupported versions;
-- secret resolution and redaction at execution time;
+- a secret manager beyond environment references (execution-time resolution and
+  streaming output redaction are implemented);
 - execution-profile, agent, team, and workflow registries;
-- factory persistence and active-run snapshots;
 - automatic discovery, browser CRUD, and remote registration; and
 - repository revision capture (the future workflow run must add the source
   revision alongside this configuration snapshot).

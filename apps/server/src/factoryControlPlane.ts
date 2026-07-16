@@ -34,6 +34,7 @@ export interface CreateRegisteredProjectWorkflowInput {
   readonly source: WorkItemSource;
   readonly workflowType: string;
   readonly requestedBy: string;
+  readonly validationCheckId?: string;
 }
 
 export const createRegisteredProjectWorkflow = Effect.fn(
@@ -78,6 +79,9 @@ export const createRegisteredProjectWorkflow = Effect.fn(
         workflowType: input.workflowType,
         requestedBy: input.requestedBy,
         projectSnapshot: registration.resolvedConfiguration,
+        ...(input.validationCheckId === undefined
+          ? {}
+          : { validationCheckId: input.validationCheckId }),
       }),
     catch: (cause) =>
       cause instanceof FactoryWorkerClientError && cause.status !== 504

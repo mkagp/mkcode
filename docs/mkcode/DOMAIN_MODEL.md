@@ -1,9 +1,10 @@
 # Factory domain model
 
-This document defines the factory domain. Phase 5 implements the minimal
+This document defines the factory domain. The current factory phases implement the minimal
 WorkItem, WorkflowRun, StageRun, Attempt, JobIntent/Lease, IdempotencyRecord,
-Approval, Artifact metadata table, and WorkflowEvent subset needed by the fixed
-simulation. ProjectDefinition, definitions, agent/command/workspace runs, and
+Approval, Artifact metadata, WorkflowEvent, and CommandRun subset needed by the
+fixed simulation plus one deterministic validating check. ProjectDefinition,
+definitions, agent/workspace runs, and
 external links remain planned unless explicitly stated otherwise.
 
 ## Domain boundary
@@ -176,12 +177,23 @@ erDiagram
 ### CommandRun
 
 - **Purpose:** recorded deterministic command execution.
-- **Identity:** stable ID plus idempotency key.
-- **Fields:** executable, arguments, working-directory policy, redacted
-  environment references, timeout, timestamps, exit status, signal, output
-  artifact references, and cancellation reason.
+- **Identity:** stable command-run ID; the stage has at most one current
+  phase-specific CommandRun.
+- **Lifecycle:** pending → starting → running → passed/failed/timed_out/
+  cancelled/spawn_failed/terminated; uncertain local ownership becomes
+  operator_attention.
+- **Fields:** immutable snapshotted definition, command category/ID, Attempt,
+  execution root, executable, ordered arguments, environment-reference names,
+  process-host execution identity, optional native PID, timeout deadline,
+  exit/signal, byte/truncation counts, redacted output references/digests,
+  outcome, failure classification, and optimistic version.
 - **Source of truth:** process result captured by controller code.
-- **Prohibited:** treating an agent statement as success.
+- **Mutable versus snapshotted:** definition and execution root are copied from
+  WorkflowRun; lifecycle/output fields are durable execution state.
+- **Prohibited:** resolved secret values, raw output, OS-PID-only identity,
+  caller-supplied executables, or treating an agent statement as success.
+- **Implemented:** migration 2 and `WorkflowEngine` own this record; output
+  contents live as restricted factory-state artifacts rather than SQLite blobs.
 
 ### Workspace
 

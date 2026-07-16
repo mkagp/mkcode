@@ -41,6 +41,7 @@ describe("factory architecture boundaries", () => {
     const web = await readPackage("apps/web");
     const worker = await readPackage("apps/factory-worker");
     const engine = await readPackage("packages/workflow-engine");
+    const commandRunner = await readPackage("packages/command-runner");
 
     NodeAssert.equal(dependencyVersion(server, "@mkcode/workflow-engine"), undefined);
     NodeAssert.equal(dependencyVersion(server, "@mkcode/factory-worker"), undefined);
@@ -50,9 +51,14 @@ describe("factory architecture boundaries", () => {
     NodeAssert.equal(dependencyVersion(worker, "react"), undefined);
     NodeAssert.equal(dependencyVersion(engine, "@t3tools/contracts"), undefined);
     NodeAssert.equal(dependencyVersion(engine, "@t3tools/web"), undefined);
+    NodeAssert.equal(dependencyVersion(engine, "@mkcode/command-runner"), undefined);
+    NodeAssert.equal(dependencyVersion(commandRunner, "@mkcode/workflow-engine"), undefined);
+    NodeAssert.equal(dependencyVersion(commandRunner, "@mkcode/factory-contracts"), undefined);
+    NodeAssert.equal(dependencyVersion(commandRunner, "react"), undefined);
+    NodeAssert.equal(dependencyVersion(web, "@mkcode/command-runner"), undefined);
   });
 
-  it("contains no process, command, Git, worktree, or provider launcher in worker production code", async () => {
+  it("keeps process launch isolated behind command-runner and excludes Git, worktrees, and providers", async () => {
     const files = await sourceFiles(NodePath.join(repositoryRoot, "apps/factory-worker/src"));
     const productionSource = (
       await Promise.all(files.map((file) => NodeFSP.readFile(file, "utf8")))
@@ -74,6 +80,27 @@ describe("factory architecture boundaries", () => {
         `Worker production code unexpectedly contains '${forbidden}'.`,
       );
     }
+    const commandFiles = await sourceFiles(
+      NodePath.join(repositoryRoot, "packages/command-runner/src"),
+    );
+    const commandSource = (
+      await Promise.all(commandFiles.map((file) => NodeFSP.readFile(file, "utf8")))
+    ).join("\n");
+    for (const forbidden of [
+      "@mkcode/workflow-engine",
+      "factory.sqlite",
+      "git worktree",
+      "Claude",
+      "Codex",
+      "OpenCode",
+      "Herdr",
+    ]) {
+      NodeAssert.equal(
+        commandSource.includes(forbidden),
+        false,
+        `Command runner unexpectedly contains '${forbidden}'.`,
+      );
+    }
   });
 
   it("does not add factory tables to interactive server migrations", async () => {
@@ -88,6 +115,7 @@ describe("factory architecture boundaries", () => {
       "job_intents",
       "idempotency_records",
       "workflow_events",
+      "command_runs",
     ]) {
       NodeAssert.equal(migrationSource.includes(table), false);
     }

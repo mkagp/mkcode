@@ -1,8 +1,8 @@
 # Open questions
 
-Defaults below allow the implemented configuration and factory-worker skeleton
-to stand without guessing at execution behavior. “Blocks next phase” now refers
-to Phase 6, the first command/agent/worktree vertical workflow.
+Defaults below allow the implemented configuration, factory worker, and
+deterministic command foundation to stand without guessing at agent behavior.
+“Blocks next phase” now refers to the bounded worktree-lifecycle slice.
 
 ## Product
 
@@ -194,6 +194,18 @@ to Phase 6, the first command/agent/worktree vertical workflow.
 
 ## Security
 
+### Which executable policy should apply beyond structured direct invocation?
+
+- **Why it matters:** `shell:false` prevents implicit shell parsing, but a
+  checked-in project can still explicitly name a shell, interpreter, or
+  privileged host executable.
+- **Recommended default:** keep project registration trusted for version one,
+  then add execution-profile allow/deny policy before external task intake or
+  less-trusted project owners are supported.
+- **Cost of delay:** the single trusted operator must review project config;
+  this does not block isolated worktree allocation.
+- **Blocks next phase:** No.
+
 ### Will product analytics be retained, and who owns its destination?
 
 - **Why it matters:** Phase 1 makes telemetry explicit opt-in and removes the
@@ -217,6 +229,16 @@ to Phase 6, the first command/agent/worktree vertical workflow.
 - **Blocks next phase:** No; blocks unattended factory deployment.
 
 ## Deployment
+
+### How long should redacted command-output artifacts be retained?
+
+- **Why it matters:** output is durable review evidence but consumes disk and
+  pattern redaction cannot guarantee removal of every sensitive value.
+- **Recommended default:** retain with the WorkflowRun until an explicit,
+  auditable run-retention policy deletes both metadata and artifacts.
+- **Cost of delay:** disk use grows; operators must monitor the factory state
+  root manually.
+- **Blocks next phase:** No, but Mini PC hardening must decide it.
 
 ### Where will databases, worktrees, artifacts, logs, and backups live?
 

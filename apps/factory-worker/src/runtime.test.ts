@@ -9,6 +9,8 @@ import * as NodePath from "node:path";
 
 import { describe, it } from "@effect/vitest";
 import type {
+  CommandOutputPage,
+  CommandRun,
   WorkflowCreateRequest,
   WorkflowCreateResult,
   WorkflowDetail,
@@ -50,6 +52,38 @@ const makeRequest = (root: string, key = "factory-http-create"): WorkflowCreateR
   },
 });
 
+const makeCommandRequest = (
+  root: string,
+  key: string,
+  args: ReadonlyArray<string>,
+  options: {
+    readonly timeoutSeconds?: number;
+    readonly environment?: ReadonlyArray<{ readonly name: string; readonly source: string }>;
+  } = {},
+): WorkflowCreateRequest => {
+  const request = makeRequest(root, key);
+  return {
+    ...request,
+    validationCheckId: "lint",
+    projectSnapshot: {
+      ...request.projectSnapshot,
+      checks: [
+        {
+          id: "lint",
+          executable: process.execPath,
+          args,
+          workingDirectory: ".",
+          resolvedWorkingDirectory: root,
+          timeoutSeconds: options.timeoutSeconds ?? 10,
+          environment: options.environment ?? [],
+          artifacts: [],
+          failureBehavior: "fail",
+        },
+      ],
+    },
+  };
+};
+
 const api = async <A>(
   worker: RunningFactoryWorker,
   path: string,
@@ -81,6 +115,51 @@ const waitForStatus = async (
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
   throw new Error(`Workflow ${runId} did not reach ${status}.`);
+};
+
+const waitForCommandStatus = async (
+  worker: RunningFactoryWorker,
+  runId: string,
+  status: CommandRun["status"],
+): Promise<WorkflowDetail> => {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    const response = await api<WorkflowDetail>(worker, `/v1/workflows/${runId}`);
+    if (response.body.commands.some((command) => command.status === status)) return response.body;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`Workflow ${runId} did not reach command status ${status}.`);
+};
+
+const waitForCommandOutput = async (
+  worker: RunningFactoryWorker,
+  commandRunId: string,
+): Promise<CommandRun> => {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    const response = await api<CommandRun>(worker, `/v1/commands/${commandRunId}`);
+    if (response.body.stdoutArtifactReference && response.body.stdoutObservedBytes > 0) {
+      return response.body;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`Command ${commandRunId} did not persist output.`);
+};
+
+const waitForLiveOutput = async (
+  worker: RunningFactoryWorker,
+  commandRunId: string,
+): Promise<CommandOutputPage> => {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    const response = await api<CommandOutputPage>(
+      worker,
+      `/v1/commands/${commandRunId}/output?stream=stdout`,
+    );
+    if (response.status === 200 && response.body.data.length > 0) return response.body;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`Command ${commandRunId} did not expose live output.`);
 };
 
 describe("factory worker API", () => {
@@ -228,6 +307,171 @@ describe("factory worker API", () => {
         },
       );
       NodeAssert.equal(repeated.body.workflowRun.version, cancelled.body.workflowRun.version);
+    } finally {
+      await worker.stop();
+      await NodeFSP.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("executes a declared check, redacts output, and serves it after restart", async () => {
+    const root = await makeRoot();
+    const stateDirectory = NodePath.join(root, "state");
+    const secret = "runtime-acceptance-secret-marker";
+    const priorSecret = process.env.MKCODE_COMMAND_TEST_SECRET;
+    process.env.MKCODE_COMMAND_TEST_SECRET = secret;
+    const config = resolveFactoryWorkerConfig({
+      host: "127.0.0.1",
+      port: 0,
+      stateDirectory,
+      credential,
+      workerInstanceId: "command-worker-before-restart",
+      pollIntervalMilliseconds: 5,
+      leaseMilliseconds: 1_000,
+    });
+    let worker = await startFactoryWorker(config);
+    try {
+      const created = await api<WorkflowCreateResult>(worker, "/v1/workflows", {
+        method: "POST",
+        body: makeCommandRequest(
+          root,
+          "command-passing",
+          ["-e", "console.log('lint passed ' + process.env.PROJECT_SECRET)"],
+          {
+            environment: [{ name: "PROJECT_SECRET", source: "MKCODE_COMMAND_TEST_SECRET" }],
+          },
+        ),
+      });
+      const waiting = await waitForStatus(worker, created.body.workflowRun.id, "human_review");
+      const command = waiting.commands[0];
+      NodeAssert.ok(command);
+      NodeAssert.equal(command.outcome, "passed");
+      const output = await api<CommandOutputPage>(
+        worker,
+        `/v1/commands/${command.id}/output?stream=stdout`,
+      );
+      NodeAssert.equal(output.status, 200);
+      NodeAssert.match(output.body.data, /lint passed \[REDACTED\]/u);
+      NodeAssert.equal(output.body.data.includes(secret), false);
+
+      await worker.stop();
+      worker = await startFactoryWorker({
+        ...config,
+        workerInstanceId: "command-worker-after-restart",
+      });
+      const recoveredOutput = await api<CommandOutputPage>(
+        worker,
+        `/v1/commands/${command.id}/output?stream=stdout`,
+      );
+      NodeAssert.equal(recoveredOutput.body.data, output.body.data);
+      NodeAssert.ok(command.stderrArtifactReference);
+      await NodeFSP.rm(NodePath.join(stateDirectory, command.stderrArtifactReference));
+      const missingOutput = await api<{ code: string }>(
+        worker,
+        `/v1/commands/${command.id}/output?stream=stderr`,
+      );
+      NodeAssert.equal(missingOutput.status, 404);
+      NodeAssert.equal(missingOutput.body.code, "not_found");
+      const events = await api<{ events: ReadonlyArray<{ eventType: string }> }>(
+        worker,
+        `/v1/events?runId=${created.body.workflowRun.id}`,
+      );
+      NodeAssert.ok(events.body.events.some((event) => event.eventType === "command.completed"));
+
+      const injection = await api<{ code: string }>(worker, "/v1/commands", {
+        method: "POST",
+        body: { executable: "bash", args: ["-c", "touch injected"] },
+      });
+      NodeAssert.equal(injection.status, 404);
+      await NodeAssert.rejects(() => NodeFSP.stat(NodePath.join(root, "injected")));
+    } finally {
+      if (priorSecret === undefined) delete process.env.MKCODE_COMMAND_TEST_SECRET;
+      else process.env.MKCODE_COMMAND_TEST_SECRET = priorSecret;
+      await worker.stop();
+      await NodeFSP.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("records nonzero declared checks as deterministic failures", async () => {
+    const root = await makeRoot();
+    const worker = await startFactoryWorker(
+      resolveFactoryWorkerConfig({
+        host: "127.0.0.1",
+        port: 0,
+        stateDirectory: NodePath.join(root, "state"),
+        credential,
+        pollIntervalMilliseconds: 5,
+        leaseMilliseconds: 1_000,
+      }),
+    );
+    try {
+      const created = await api<WorkflowCreateResult>(worker, "/v1/workflows", {
+        method: "POST",
+        body: makeCommandRequest(root, "command-failing", [
+          "-e",
+          "console.error('lint failed'); process.exit(2)",
+        ]),
+      });
+      const failed = await waitForStatus(worker, created.body.workflowRun.id, "failed");
+      NodeAssert.equal(failed.commands[0]?.outcome, "failed");
+      NodeAssert.equal(failed.commands[0]?.exitCode, 2);
+      NodeAssert.equal(failed.commands[0]?.failureClassification, "nonzero_exit");
+    } finally {
+      await worker.stop();
+      await NodeFSP.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("times out and durably cancels declared checks", async () => {
+    const root = await makeRoot();
+    const worker = await startFactoryWorker(
+      resolveFactoryWorkerConfig({
+        host: "127.0.0.1",
+        port: 0,
+        stateDirectory: NodePath.join(root, "state"),
+        credential,
+        pollIntervalMilliseconds: 5,
+        leaseMilliseconds: 1_000,
+      }),
+    );
+    try {
+      const timed = await api<WorkflowCreateResult>(worker, "/v1/workflows", {
+        method: "POST",
+        body: makeCommandRequest(root, "command-timeout", ["-e", "setInterval(() => {}, 1000)"], {
+          timeoutSeconds: 1,
+        }),
+      });
+      const timedOut = await waitForCommandStatus(worker, timed.body.workflowRun.id, "timed_out");
+      NodeAssert.equal(timedOut.workflowRun.status, "failed");
+      NodeAssert.equal(timedOut.commands[0]?.timedOut, true);
+
+      const cancellable = await api<WorkflowCreateResult>(worker, "/v1/workflows", {
+        method: "POST",
+        body: makeCommandRequest(root, "command-cancel", [
+          "-e",
+          "setInterval(() => console.log('waiting'), 25)",
+        ]),
+      });
+      const running = await waitForCommandStatus(
+        worker,
+        cancellable.body.workflowRun.id,
+        "running",
+      );
+      const command = running.commands[0];
+      NodeAssert.ok(command);
+      await waitForLiveOutput(worker, command.id);
+      const cancelled = await api<WorkflowDetail>(worker, `/v1/commands/${command.id}/cancel`, {
+        method: "POST",
+        body: { requestedBy: "operator" },
+      });
+      NodeAssert.equal(cancelled.body.workflowRun.status, "cancelled");
+      const durable = await waitForCommandStatus(
+        worker,
+        cancellable.body.workflowRun.id,
+        "cancelled",
+      );
+      NodeAssert.equal(durable.commands[0]?.cancelled, true);
+      const withOutput = await waitForCommandOutput(worker, command.id);
+      NodeAssert.ok(withOutput.stdoutObservedBytes > 0);
     } finally {
       await worker.stop();
       await NodeFSP.rm(root, { recursive: true, force: true });

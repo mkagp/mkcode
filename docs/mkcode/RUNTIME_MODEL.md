@@ -85,10 +85,18 @@ interface ProcessHost {
 }
 ```
 
-The first implementation may use a local child-process host. It must capture
+The first implementation now uses a local child-process host. It captures
 process group identity, exit status or signal, output cursors, timestamps, and
 reconciliation metadata. A later `HerdrProcessHost` must fit behind the same
 contract.
+
+`packages/command-runner/src/processHost.ts` is the implemented narrow port:
+`start`, `status`, `interrupt`, and `terminate`. `LocalProcessHost` uses
+`shell:false` and a separate Linux process group; output storage/paging is a
+separate command-runner concern. Generated execution IDs are durable identity,
+while native PIDs are host metadata. After a full worker restart the local host
+cannot prove ownership from PID alone, so active CommandRuns become
+`operator_attention` rather than being reattached or relaunched.
 
 ProcessHost output is observational. It can prove that a process exited with a
 code; it cannot decide that an agent satisfied a workflow stage. Deterministic

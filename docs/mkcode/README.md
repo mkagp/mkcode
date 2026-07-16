@@ -3,8 +3,8 @@
 MK Code is a hard fork of T3 Code that is becoming an independently maintained,
 browser-based control plane for interactive coding sessions and durable agentic
 development workflows. The current repository is a working T3-derived product;
-its Phase 5 simulation worker, workflow engine, and factory database are
-operational. The broader registry, execution, and integration architecture
+its Phase 5 worker, workflow engine, factory database, and deterministic
+project-command execution path are operational. The broader registry and integration architecture
 described here remains a target.
 
 ## Current status
@@ -13,9 +13,9 @@ The fixed upstream-derived starting baseline is
 `ecb35f75839925dd1ac6f854efeef5c9e291d11b`. The existing browser, server,
 provider adapters, interactive orchestration, SQLite persistence, Git/worktree
 support, local authentication, and Tailscale support are operational. The
-simulation-only factory worker, workflow engine, and factory database are now
-operational. Agent/team/workflow/profile registries, command and worktree
-execution, and Herdr, Linear, and workflow-oriented GitHub adapters remain
+factory worker, workflow engine, factory database, and declared-check execution
+are now operational. Agent/team/workflow/profile registries, worktree
+allocation, and Herdr, Linear, and workflow-oriented GitHub adapters remain
 planned components.
 
 Phase 1 fork-safety controls are implemented: one validation-only active
@@ -29,13 +29,15 @@ Minimal project configuration and local project registration are implemented.
 The server can validate a checked-in `.mkcode/project.yaml`, store an isolated
 local registration, and expose browser-safe `projectRegistry.*` contracts.
 
-The durable factory-worker skeleton is now implemented in
+The durable factory-worker and deterministic command foundation are implemented in
 `apps/factory-worker`, `packages/factory-contracts`, and
-`packages/workflow-engine`. It owns a separate factory SQLite database,
+`packages/workflow-engine`, with process execution isolated in
+`packages/command-runner`. It owns a separate factory SQLite database,
 transactional stage/job/event state, leases, retries, cancellation, durable
-human approval, recovery, and an authenticated loopback API. Its handlers are
-simulation-only: no project command, worktree, Git operation, agent, provider,
-or external integration is launched.
+human approval, CommandRuns, redacted file-backed output, recovery, and an
+authenticated loopback API. A selected validation check is resolved only from
+the immutable run snapshot and invoked without a shell. Worktrees, Git
+operations, agents, providers, and external integrations are not launched.
 
 MK Code does not seek full T3 Code feature parity. Desktop, mobile, marketing,
 T3 Connect, relay infrastructure, and public T3 distribution remain present
@@ -70,6 +72,9 @@ Architecture decisions:
 - [0007: Factory persistence ownership](DECISIONS/0007-factory-persistence-ownership.md)
 - [0008: Transactional job intents](DECISIONS/0008-transactional-job-intents.md)
 - [0009: Worker loopback API authentication](DECISIONS/0009-worker-loopback-api-authentication.md)
+- [0010: Deterministic command execution](DECISIONS/0010-deterministic-command-execution.md)
+- [0011: Local process host](DECISIONS/0011-local-process-host.md)
+- [0012: Command output and redaction](DECISIONS/0012-command-output-and-redaction.md)
 
 ## Terminology
 
