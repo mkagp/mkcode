@@ -42,6 +42,7 @@ describe("factory architecture boundaries", () => {
     const worker = await readPackage("apps/factory-worker");
     const engine = await readPackage("packages/workflow-engine");
     const commandRunner = await readPackage("packages/command-runner");
+    const workspaceManager = await readPackage("packages/workspace-manager");
 
     NodeAssert.equal(dependencyVersion(server, "@mkcode/workflow-engine"), undefined);
     NodeAssert.equal(dependencyVersion(server, "@mkcode/factory-worker"), undefined);
@@ -56,6 +57,11 @@ describe("factory architecture boundaries", () => {
     NodeAssert.equal(dependencyVersion(commandRunner, "@mkcode/factory-contracts"), undefined);
     NodeAssert.equal(dependencyVersion(commandRunner, "react"), undefined);
     NodeAssert.equal(dependencyVersion(web, "@mkcode/command-runner"), undefined);
+    NodeAssert.equal(dependencyVersion(engine, "@mkcode/workspace-manager"), undefined);
+    NodeAssert.equal(dependencyVersion(workspaceManager, "@mkcode/workflow-engine"), undefined);
+    NodeAssert.equal(dependencyVersion(workspaceManager, "@mkcode/factory-contracts"), undefined);
+    NodeAssert.equal(dependencyVersion(web, "@mkcode/workspace-manager"), undefined);
+    NodeAssert.equal(dependencyVersion(server, "@mkcode/workspace-manager"), undefined);
   });
 
   it("keeps process launch isolated behind command-runner and excludes Git, worktrees, and providers", async () => {
@@ -116,6 +122,7 @@ describe("factory architecture boundaries", () => {
       "idempotency_records",
       "workflow_events",
       "command_runs",
+      "workspaces",
     ]) {
       NodeAssert.equal(migrationSource.includes(table), false);
     }

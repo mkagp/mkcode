@@ -116,7 +116,9 @@ allows an unbounded handler wait to hold the HTTP listener and database open.
 `MKCODE_FACTORY_SHUTDOWN_GRACE_MS` may override the default five-second shutdown
 grace period.
 
-`commandWorker.ts` composes the workflow engine with
+`workspaceWorker.ts` composes the workflow engine with
+`@mkcode/workspace-manager` for durable allocation, inspection,
+reconciliation, retention, and safe cleanup. `commandWorker.ts` composes the workflow engine with
 `@mkcode/command-runner`. It resolves the CommandRun created from the immutable
 WorkflowRun snapshot, records launch fences, renews the job lease, and persists
 the deterministic result. `api.ts` authenticates all routes with a constant-time comparison of a separate
@@ -195,6 +197,13 @@ requires a staged separation from generic local auth and connection behavior.
   redaction, bounded `0600` output artifacts, timeout/cancellation, and the
   `LocalProcessHost`. It imports no workflow persistence, UI, provider, Git, or
   Herdr implementation.
+- `packages/workspace-manager`: provider-neutral workspace port and the
+  Linux-first `GitWorktreeWorkspaceManager`. It performs direct, bounded,
+  no-shell Git inspection/allocation/removal, writes a private pre-allocation
+  ownership claim for crash-safe resumption, finalizes ownership evidence in
+  per-worktree Git administration, suppresses Git hooks/fsmonitor and rejects
+  repository-local filter helpers, and imports no workflow persistence, UI,
+  provider, command-runner, or Herdr code.
 - `packages/shared`: runtime utilities shared by server and clients. It uses
   explicit subpath exports rather than a barrel. It includes project-script,
   Git, QR, platform, and general utilities.
@@ -371,6 +380,14 @@ and marks ambiguous completed-job/uncommitted-transition state as
 `command_runs`, its recovery indexes, and the selected validation-check
 reference on WorkflowRun without modifying migration 1.
 
+Migration 3 (`packages/workflow-engine/src/migrations/003_workspaces.ts`) adds a
+one-to-one `workspaces` record and uniqueness fences for canonical worktree paths
+and generated branches. Command-backed runs now begin at
+`allocating_workspace`. The allocation intent, exact base commit, branch, path,
+ownership digest, and allocation JobIntent are durable before Git side effects.
+After Git verification, one transaction marks the workspace ready and schedules
+the selected validation CommandRun with the worktree as its execution root.
+
 When a selected check reaches `validating`, the same transaction creates its
 CommandRun, `command.execute` JobIntent, and `command.scheduled` event. The
 worker invokes the snapshotted executable and ordered arguments with
@@ -382,10 +399,23 @@ Cancellation interrupts the Linux process group, persists pre-cancel output,
 and cannot be overwritten by a later child exit. Events use a SQLite
 autoincrement cursor and replay after restart. Current simulation handlers only
 cover planning and implementing; only the validating stage can execute one
-selected check.
+selected check. Human review, approval, rejection, and operator attention retain
+the worktree. Terminal runs expose an authenticated, ID-only cleanup request;
+cleanup uses `git worktree remove` without force and retains the branch.
 
 ## Git, worktrees, checkpoints, terminals, and previews
 
+The factory path is now separate from the interactive VCS path.
+`packages/workspace-manager/src/workspaceManager.ts` resolves the configured base
+ref to a commit, creates `mkcode/run-...` branches and worktrees under
+`<factory-state>/worktrees/<project-id>/`, and stores
+`mkcode-workspace.json` in Git's per-worktree administration directory rather
+than the checked-out tree. Cleanup requires the durable record, canonical path,
+Git common directory, branch, metadata entry, and marker digest to agree. Dirty,
+locked, detached, missing, moved, or mismatched worktrees are retained or routed
+to operator attention; the primary checkout is never force-reset or removed.
+
+The inherited interactive system remains separate:
 `apps/server/src/vcs/VcsDriver.ts:41` and `VcsDriverRegistry.ts:63` define a VCS
 seam, although Git is the only implementation. Worktree creation/removal lives
 in `GitVcsDriverCore.ts:2245` and uses the configured root from
@@ -403,6 +433,9 @@ The server exposes PTY-backed terminals and browser preview services. Electron
 adds richer persistent preview tabs, screenshot/recording, and element-picking
 behavior. These are useful interactive observations but do not represent durable
 workflow state.
+
+Worktrees isolate file changes between runs but are not security sandboxes: they
+share the worker's OS identity, filesystem visibility, network, and credentials.
 
 ## Authentication, pairing, and remote access
 

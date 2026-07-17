@@ -10,6 +10,7 @@ import {
   WorkflowListMaximumPageSize,
   WorkflowCancelRequest,
   WorkflowCreateRequest,
+  WorkspaceActionRequest,
   type FactoryApiError,
 } from "@mkcode/factory-contracts";
 import {
@@ -29,6 +30,10 @@ const decodeCancel = Schema.decodeUnknownSync(WorkflowCancelRequest, {
   errors: "all",
 });
 const decodeApproval = Schema.decodeUnknownSync(ApprovalResolveRequest, {
+  onExcessProperty: "error",
+  errors: "all",
+});
+const decodeWorkspaceAction = Schema.decodeUnknownSync(WorkspaceActionRequest, {
   onExcessProperty: "error",
   errors: "all",
 });
@@ -198,6 +203,33 @@ export function createFactoryApiServer(input: {
         const detail = input.engine.cancelWorkflow(runId, body);
         input.onWorkflowCancelled?.(runId);
         json(response, 200, detail);
+        return;
+      }
+
+      const workflowWorkspaceMatch = /^\/v1\/workflows\/([^/]+)\/workspace$/u.exec(url.pathname);
+      if (method === "GET" && workflowWorkspaceMatch?.[1]) {
+        json(
+          response,
+          200,
+          input.engine.readWorkflowWorkspace(decodeIdentifier(workflowWorkspaceMatch[1])),
+        );
+        return;
+      }
+
+      const workspaceMatch = /^\/v1\/workspaces\/([^/]+)$/u.exec(url.pathname);
+      if (method === "GET" && workspaceMatch?.[1]) {
+        json(response, 200, input.engine.readWorkspace(decodeIdentifier(workspaceMatch[1])));
+        return;
+      }
+
+      const workspaceCleanupMatch = /^\/v1\/workspaces\/([^/]+)\/cleanup$/u.exec(url.pathname);
+      if (method === "POST" && workspaceCleanupMatch?.[1]) {
+        const body = decodeRequest(decodeWorkspaceAction, await readJsonBody(request));
+        json(
+          response,
+          202,
+          input.engine.requestWorkspaceCleanup(decodeIdentifier(workspaceCleanupMatch[1]), body),
+        );
         return;
       }
 

@@ -64,17 +64,18 @@ deterministic command foundation to stand without guessing at agent behavior.
   skeleton can store them without launching agents.
 - **Blocks next phase:** No.
 
-### Should worktree roots outside a registered repository be allowed?
+### Should operators be allowed to override the factory-owned worktree root?
 
-- **Why it matters:** version 1 configuration deliberately constrains the
-  project-supplied worktree root inside the repository; operators may prefer a
-  central high-capacity filesystem.
-- **Recommended default:** keep checked-in paths contained. Add any external
-  root as trusted machine-local registration policy with canonical allowlisted
-  roots and explicit ownership markers.
-- **Cost of delay:** early workflow worktrees must use the contained default or
-  a server-owned path chosen outside project configuration.
-- **Blocks next phase:** No; it must be decided before Phase 6 creates worktrees.
+- **Why it matters:** the implemented v1 policy deliberately ignores the
+  checked-in repository-relative allocation destination and uses
+  `<factory-state>/worktrees/<project-id>`; large repositories may need another
+  filesystem.
+- **Recommended default:** keep the factory-owned root until machine-local
+  registration policy can allowlist canonical roots with capacity checks and
+  identical ownership/permission semantics.
+- **Cost of delay:** worktree storage capacity is tied to factory state, but the
+  current ownership boundary stays simple and safe.
+- **Blocks next phase:** No.
 
 ## Persistence
 
@@ -240,12 +241,13 @@ deterministic command foundation to stand without guessing at agent behavior.
   root manually.
 - **Blocks next phase:** No, but Mini PC hardening must decide it.
 
-### Where will databases, worktrees, artifacts, logs, and backups live?
+### Where will databases, worktrees, artifacts, logs, and backups live in deployment?
 
 - **Why it matters:** determines permissions, capacity monitoring, and recovery.
 - **Recommended default:** separate service-owned directories under a documented
-  MK Code home; backups outside the active data directory; worktrees on the same
-  filesystem as their Git repository unless proven otherwise.
+  MK Code home; backups outside the active data directory. Keep the implemented
+  factory-state worktree root until an allowlisted machine-local override and
+  disk-pressure policy are designed.
 - **Cost of delay:** the implemented local factory default is usable, but
   unattended deployment paths, backup locations, and capacity policy remain
   provisional.

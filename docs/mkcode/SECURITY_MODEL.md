@@ -33,14 +33,14 @@ separately reviewed authentication and authorization model is implemented.
 ## Commands and processes
 
 - Represent commands as executable plus argument array.
-- Resolve executables against an allow policy and reject forbidden paths or
-  interpreters unless explicitly approved.
+- **Target, not yet implemented:** resolve executables against an allow policy
+  and reject forbidden paths or interpreters unless explicitly approved.
 - Set working directory from an owned Workspace, not arbitrary task input.
 - Apply timeout, cancellation, process-group termination, output limits, and
   orphan reconciliation.
 - Distinguish exit code, terminating signal, timeout, cancellation, and host loss.
-- Default network policy is project/profile controlled; sensitive workflows may
-  require no network or an allowlist.
+- **Target, not yet implemented:** make network policy project/profile
+  controlled; sensitive workflows may require no network or an allowlist.
 - Runtime processes and deterministic commands receive only required secret
   references and environment values.
 
@@ -53,11 +53,36 @@ set, including when a caller supplies additional protected sources; it is
 neither inherited nor permitted as a declared source. Resolved values are held
 in memory for launch and redaction only.
 
-Working directories are relative to the snapshotted repository execution root,
-checked lexically and by realpath, and checked again immediately before spawn.
+Working directories are relative to the snapshotted command definition but, for
+new command-backed runs, resolve against the canonical factory worktree rather
+than the registered primary checkout. They are checked lexically and by
+realpath, and checked again immediately before spawn.
 This narrows but does not eliminate filesystem TOCTOU races. Commands run with
 the factory worker's OS authority and network access; process groups and
 worktrees are not sandboxes.
+
+The Git workspace manager accepts source/base data only from the immutable run
+snapshot and derives the destination and branch itself. It uses direct Git argv
+with no shell, no force flags, no destructive reset, and no global Git config
+mutation. Git subprocesses ignore system/global configuration, disable hooks and
+fsmonitor execution, and reject repository-local filter/fsmonitor helpers before
+allocation. The effective root is under private factory state (`0700` directories).
+Before Git creation, a matching `0600` nonsecret allocation claim is written
+under the private factory worktree root. It allows a crash immediately after
+`git worktree add` to be resumed without claiming an unrelated directory. The
+claim is removed after the durable ownership marker is finalized in Git's
+per-worktree administrative directory, avoiding ordinary untracked files in
+the checkout.
+Cleanup requires agreement among the database relationship, canonical path,
+Git common directory and metadata, branch, and marker digest. Missing,
+symlinked, altered, dirty, locked, detached, or otherwise ambiguous evidence
+prevents deletion. The initial policy retains the branch after removing a clean
+worktree.
+
+Worktree allocation narrows accidental cross-run modification but does not stop
+a declared executable from reading or writing other host paths available to the
+worker identity. Canonicalization reduces traversal/symlink mistakes but cannot
+eliminate filesystem TOCTOU races without stronger containment.
 
 ## Implemented project-configuration boundary
 
@@ -87,11 +112,14 @@ non-Linux behavior has not received equivalent verification.
 
 Artifact and worktree paths may not exist at validation time. The resolver
 canonicalizes their deepest existing ancestor and rejects escapes and invalid
-ancestor types, but a future command/workspace implementation must repeat
-canonical parent/final-path checks at the moment of creation or use. Structured
-commands can still explicitly name a shell or dangerous executable, so the
-future runner must enforce executable, argument, network, credential, output,
-and cancellation policy. The parser is not a security sandbox.
+ancestor types. The implemented command runner and workspace manager repeat
+canonical parent/final-path checks at process launch and worktree allocation or
+cleanup. Current structured commands are unrestricted by executable policy
+beyond the implemented schema, path, environment-reference, and direct-spawn
+checks: they can still explicitly name a shell or dangerous executable.
+Executable allow/deny resolution, network controls, and stronger credential
+policy are deferred target behavior. The parser and worktree are not security
+sandboxes.
 
 ## Secrets and redaction
 

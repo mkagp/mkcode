@@ -11,11 +11,11 @@ described here remains a target.
 
 The fixed upstream-derived starting baseline is
 `ecb35f75839925dd1ac6f854efeef5c9e291d11b`. The existing browser, server,
-provider adapters, interactive orchestration, SQLite persistence, Git/worktree
-support, local authentication, and Tailscale support are operational. The
-factory worker, workflow engine, factory database, and declared-check execution
-are now operational. Agent/team/workflow/profile registries, worktree
-allocation, and Herdr, Linear, and workflow-oriented GitHub adapters remain
+provider adapters, interactive orchestration, SQLite persistence, local
+authentication, and Tailscale support are operational. The factory worker,
+workflow engine, factory database, declared-check execution, and factory-owned
+Git worktree lifecycle are now operational. Agent/team/workflow/profile
+registries and Herdr, Linear, and workflow-oriented GitHub adapters remain
 planned components.
 
 Phase 1 fork-safety controls are implemented: one validation-only active
@@ -29,15 +29,18 @@ Minimal project configuration and local project registration are implemented.
 The server can validate a checked-in `.mkcode/project.yaml`, store an isolated
 local registration, and expose browser-safe `projectRegistry.*` contracts.
 
-The durable factory-worker and deterministic command foundation are implemented in
-`apps/factory-worker`, `packages/factory-contracts`, and
+The durable factory-worker and deterministic command/workspace foundation are
+implemented in `apps/factory-worker`, `packages/factory-contracts`, and
 `packages/workflow-engine`, with process execution isolated in
-`packages/command-runner`. It owns a separate factory SQLite database,
+`packages/command-runner` and Git effects isolated in
+`packages/workspace-manager`. It owns a separate factory SQLite database,
 transactional stage/job/event state, leases, retries, cancellation, durable
 human approval, CommandRuns, redacted file-backed output, recovery, and an
 authenticated loopback API. A selected validation check is resolved only from
-the immutable run snapshot and invoked without a shell. Worktrees, Git
-operations, agents, providers, and external integrations are not launched.
+the immutable run snapshot and invoked without a shell inside a factory-owned
+worktree created from a recorded immutable base commit. Worktrees are retained
+for human review and require proven ownership for cleanup. Coding agents,
+providers, Herdr, and external integrations are not launched.
 
 MK Code does not seek full T3 Code feature parity. Desktop, mobile, marketing,
 T3 Connect, relay infrastructure, and public T3 distribution remain present
@@ -75,6 +78,9 @@ Architecture decisions:
 - [0010: Deterministic command execution](DECISIONS/0010-deterministic-command-execution.md)
 - [0011: Local process host](DECISIONS/0011-local-process-host.md)
 - [0012: Command output and redaction](DECISIONS/0012-command-output-and-redaction.md)
+- [0013: Factory worktree ownership](DECISIONS/0013-factory-worktree-ownership.md)
+- [0014: Workspace retention and cleanup](DECISIONS/0014-workspace-retention-and-cleanup.md)
+- [0015: Workspace reconciliation](DECISIONS/0015-workspace-reconciliation.md)
 
 ## Terminology
 
@@ -88,6 +94,7 @@ Architecture decisions:
 | ExecutionProfile | Runtime, provider, model, sandbox, approval, and resource selection.               |
 | AgentRun         | One execution of an AgentDefinition under a resolved ExecutionProfile.             |
 | ProcessHost      | Replaceable mechanism that starts and observes operating-system processes.         |
+| Workspace        | Factory-owned execution root associated one-to-one with a WorkflowRun.             |
 | Herdr            | A future ProcessHost and terminal-observability integration, never workflow truth. |
 
 The words **current** and **verified** refer to code or behavior observed in this

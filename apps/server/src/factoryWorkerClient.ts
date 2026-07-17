@@ -11,6 +11,8 @@ import {
   WorkflowCreateResult,
   WorkflowDetail,
   WorkflowListResult,
+  Workspace,
+  WorkspaceActionRequest,
   type ApprovalResolveRequest as ApprovalResolveRequestType,
   type CommandOutputPage as CommandOutputPageType,
   type CommandRun as CommandRunType,
@@ -21,6 +23,8 @@ import {
   type WorkflowCreateResult as WorkflowCreateResultType,
   type WorkflowDetail as WorkflowDetailType,
   type WorkflowListResult as WorkflowListResultType,
+  type Workspace as WorkspaceType,
+  type WorkspaceActionRequest as WorkspaceActionRequestType,
 } from "@mkcode/factory-contracts";
 import * as NodeTimers from "node:timers";
 import * as Schema from "effect/Schema";
@@ -45,12 +49,14 @@ const decodeWorkflowList = Schema.decodeUnknownSync(WorkflowListResult, {
 const decodeEvents = Schema.decodeUnknownSync(EventsListResult, {
   onExcessProperty: "error",
 });
+const decodeWorkspace = Schema.decodeUnknownSync(Workspace, { onExcessProperty: "error" });
 const decodeApiError = Schema.decodeUnknownSync(FactoryApiError, {
   onExcessProperty: "error",
 });
 const encodeCreate = Schema.encodeSync(WorkflowCreateRequest);
 const encodeCancel = Schema.encodeSync(WorkflowCancelRequest);
 const encodeApproval = Schema.encodeSync(ApprovalResolveRequest);
+const encodeWorkspaceAction = Schema.encodeSync(WorkspaceActionRequest);
 
 export class FactoryWorkerClientError extends Error {
   readonly status: number;
@@ -170,6 +176,30 @@ export class FactoryWorkerClient {
       await this.#request(`/v1/commands/${encodeURIComponent(commandRunId)}/cancel`, {
         method: "POST",
         body: JSON.stringify(encodeCancel(input)),
+      }),
+    );
+  }
+
+  async readWorkflowWorkspace(workflowRunId: string): Promise<WorkspaceType> {
+    return decodeWorkspace(
+      await this.#request(`/v1/workflows/${encodeURIComponent(workflowRunId)}/workspace`),
+    );
+  }
+
+  async readWorkspace(workspaceId: string): Promise<WorkspaceType> {
+    return decodeWorkspace(
+      await this.#request(`/v1/workspaces/${encodeURIComponent(workspaceId)}`),
+    );
+  }
+
+  async cleanupWorkspace(
+    workspaceId: string,
+    input: WorkspaceActionRequestType,
+  ): Promise<WorkspaceType> {
+    return decodeWorkspace(
+      await this.#request(`/v1/workspaces/${encodeURIComponent(workspaceId)}/cleanup`, {
+        method: "POST",
+        body: JSON.stringify(encodeWorkspaceAction(input)),
       }),
     );
   }

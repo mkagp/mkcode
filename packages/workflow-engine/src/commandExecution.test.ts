@@ -1,6 +1,7 @@
 // @effect-diagnostics nodeBuiltinImport:off
 // @effect-diagnostics globalDate:off -- Tests use explicit durable timestamps.
 import * as NodeAssert from "node:assert/strict";
+import * as NodeFS from "node:fs";
 import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
@@ -48,14 +49,54 @@ const createCommandWorkflow = (engine: WorkflowEngine, root: string) => {
 };
 
 const claimValidation = (engine: WorkflowEngine, owner = "worker-a") => {
-  for (let index = 0; index < 2; index += 1) {
-    const claimed = engine.claimNextJob(owner);
-    NodeAssert.ok(claimed);
-    engine.completeJob(claimed.job.id, owner, { simulated: true }, claimed.stageVersion);
-  }
+  const allocation = engine.claimNextJob(owner);
+  NodeAssert.ok(allocation);
+  NodeAssert.equal(allocation.job.jobType, "workspace.allocate");
+  const detail = engine.readWorkflow(allocation.job.workflowRunId);
+  const workspace = detail.workspaces[0];
+  NodeAssert.ok(workspace);
+  const root = detail.workflowRun.projectSnapshot.repository.root;
+  const worktree = NodePath.join(root, "factory-worktree");
+  NodeFS.mkdirSync(worktree, { recursive: true });
+  engine.beginWorkspaceAllocation({
+    workspaceId: workspace.id,
+    jobId: allocation.job.id,
+    leaseOwner: owner,
+    expectedStageVersion: allocation.stageVersion,
+    evidence: {
+      canonicalSourceRepositoryPath: root,
+      gitCommonDirectory: NodePath.join(root, ".git"),
+      resolvedBaseReference: "refs/heads/main",
+      resolvedBaseCommit: "a".repeat(40),
+      baseResolvedAt: "2026-07-16T00:00:00.000Z",
+      generatedBranchName: `mkcode/run-${detail.workflowRun.id}`,
+      worktreePath: worktree,
+      effectiveWorktreeRoot: NodePath.dirname(root),
+      ownershipClaimPath: NodePath.join(root, ".claims", `${workspace.id}.json`),
+      ownershipMarkerDigest: "marker-digest",
+    },
+  });
+  engine.confirmWorkspaceAllocation({
+    workspaceId: workspace.id,
+    jobId: allocation.job.id,
+    leaseOwner: owner,
+    expectedStageVersion: allocation.stageVersion,
+    evidence: {
+      canonicalWorktreePath: worktree,
+      ownershipMarkerPath: NodePath.join(root, ".git", "mkcode-workspace.json"),
+      ownershipMarkerDigest: "marker-digest",
+      gitMetadataState: "registered",
+      currentObservedHead: "a".repeat(40),
+      currentObservedBranch: `mkcode/run-${detail.workflowRun.id}`,
+      dirty: false,
+    },
+  });
   const claimed = engine.claimNextJob(owner);
   NodeAssert.ok(claimed);
   NodeAssert.equal(claimed.job.jobType, "command.execute");
+  const command = engine.readWorkflow(claimed.job.workflowRunId).commands[0];
+  NodeAssert.ok(command);
+  NodeAssert.notEqual(command.executionRoot, root);
   return claimed;
 };
 
@@ -129,7 +170,7 @@ describe("durable command execution", () => {
         nativePid: 1234,
         startedAt: "2026-07-16T00:00:00.000Z",
         timeoutDeadline: "2026-07-16T00:00:30.000Z",
-        workingDirectory: root,
+        workingDirectory: pending.executionRoot,
       }),
     );
     NodeAssert.throws(() =>
@@ -152,7 +193,7 @@ describe("durable command execution", () => {
       nativePid: 1234,
       startedAt: "2026-07-16T00:00:00.000Z",
       timeoutDeadline: "2026-07-16T00:00:30.000Z",
-      workingDirectory: root,
+      workingDirectory: pending.executionRoot,
     });
     NodeAssert.throws(() =>
       engine.completeCommand({
@@ -161,7 +202,10 @@ describe("durable command execution", () => {
         leaseOwner: "worker-a",
         expectedCommandVersion: running.version,
         expectedStageVersion: claimed.stageVersion,
-        result: { ...completion("passed", root), executionId: "different-execution" },
+        result: {
+          ...completion("passed", pending.executionRoot),
+          executionId: "different-execution",
+        },
       }),
     );
     const detail = engine.completeCommand({
@@ -170,7 +214,7 @@ describe("durable command execution", () => {
       leaseOwner: "worker-a",
       expectedCommandVersion: running.version,
       expectedStageVersion: claimed.stageVersion,
-      result: completion("passed", root),
+      result: completion("passed", pending.executionRoot),
     });
 
     NodeAssert.equal(detail.workflowRun.status, "human_review");
@@ -209,7 +253,7 @@ describe("durable command execution", () => {
       leaseOwner: "worker-a",
       expectedCommandVersion: starting.version,
       expectedStageVersion: claimed.stageVersion,
-      result: completion("failed", root),
+      result: completion("failed", pending.executionRoot),
     });
     NodeAssert.equal(detail.workflowRun.status, "failed");
     NodeAssert.equal(detail.commands[0]?.failureClassification, "nonzero_exit");
@@ -240,12 +284,15 @@ describe("durable command execution", () => {
       leaseOwner: "worker-a",
       expectedCommandVersion: starting.version,
       expectedStageVersion: claimed.stageVersion,
-      result: completion("passed", root),
+      result: completion("passed", pending.executionRoot),
     } as const;
     engine.completeCommand(input);
     NodeAssert.equal(engine.completeCommand(input).workflowRun.status, "human_review");
     NodeAssert.throws(() =>
-      engine.completeCommand({ ...input, result: completion("failed", root) }),
+      engine.completeCommand({
+        ...input,
+        result: completion("failed", pending.executionRoot),
+      }),
     );
     engine.close();
   });
@@ -274,7 +321,7 @@ describe("durable command execution", () => {
       leaseOwner: "worker-a",
       expectedCommandVersion: starting.version,
       expectedStageVersion: claimed.stageVersion,
-      result: completion("operator_attention", root),
+      result: completion("operator_attention", pending.executionRoot),
     } as const;
     const completed = engine.completeCommand(input);
     NodeAssert.equal(completed.workflowRun.status, "operator_attention");
@@ -313,11 +360,11 @@ describe("durable command execution", () => {
       leaseOwner: "worker-a",
       expectedCommandVersion: starting.version,
       expectedStageVersion: claimed.stageVersion,
-      result: completion("passed", root),
+      result: completion("passed", pending.executionRoot),
     });
     NodeAssert.equal(detail.workflowRun.status, "cancelled");
     NodeAssert.equal(detail.commands[0]?.status, "cancelled");
-    const cancelledResult = completion("cancelled", root);
+    const cancelledResult = completion("cancelled", pending.executionRoot);
     engine.recordCancelledCommandResult(pending.id, cancelledResult);
     NodeAssert.equal(
       engine.recordCancelledCommandResult(pending.id, cancelledResult).status,
@@ -354,6 +401,39 @@ describe("durable command execution", () => {
     NodeAssert.equal(detail.workflowRun.status, "failed");
     NodeAssert.equal(detail.commands[0]?.status, "spawn_failed");
     NodeAssert.equal(detail.commands[0]?.failureClassification, "invalid_command_snapshot");
+    NodeAssert.equal(detail.workspaces[0]?.status, "retained");
+    engine.close();
+  });
+
+  it("retains the workspace when process launch fails after command scheduling", async () => {
+    const root = await makeRoot();
+    const engine = await WorkflowEngine.open({ stateDirectory: NodePath.join(root, "state") });
+    const created = createCommandWorkflow(engine, root);
+    const claimed = claimValidation(engine);
+    const pending = engine.readWorkflow(created.workflowRun.id).commands[0];
+    NodeAssert.ok(pending);
+    const starting = engine.startCommand({
+      commandRunId: pending.id,
+      jobId: claimed.job.id,
+      leaseOwner: "worker-a",
+      attemptId: claimed.attempt.id,
+      expectedStageVersion: claimed.stageVersion,
+      processHostExecutionId: "execution-1",
+      processHostType: "local",
+      stdoutArtifactReference: "command-output/execution-1/stdout.log",
+      stderrArtifactReference: "command-output/execution-1/stderr.log",
+    });
+    const detail = engine.failCommandBeforeLaunch({
+      commandRunId: pending.id,
+      jobId: claimed.job.id,
+      leaseOwner: "worker-a",
+      expectedCommandVersion: starting.version,
+      expectedStageVersion: claimed.stageVersion,
+      failureClassification: "spawn_failed",
+    });
+    NodeAssert.equal(detail.workflowRun.status, "failed");
+    NodeAssert.equal(detail.commands[0]?.status, "spawn_failed");
+    NodeAssert.equal(detail.workspaces[0]?.status, "retained");
     engine.close();
   });
 

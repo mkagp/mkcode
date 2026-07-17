@@ -25,6 +25,8 @@ import {
   type WorkflowEvent,
   type WorkflowListResult,
   type WorkflowRun,
+  type Workspace,
+  type WorkspaceActionRequest,
   WorkflowListDefaultPageSize,
   WorkflowListMaximumPageSize,
   type WorkItem,
@@ -37,9 +39,10 @@ import { resolveSnapshotCommand } from "./commandResolution.ts";
 import { WorkflowEngineError } from "./errors.ts";
 import { migration001Sql } from "./migrations/001_initial.ts";
 import { migration002Sql } from "./migrations/002_command_runs.ts";
+import { migration003Sql } from "./migrations/003_workspaces.ts";
 import { ensurePrivateDirectory, ensurePrivateFile, openPrivateFile } from "./statePermissions.ts";
 
-export const FACTORY_SCHEMA_VERSION = 2;
+export const FACTORY_SCHEMA_VERSION = 3;
 export const DEFAULT_LEASE_MILLISECONDS = 30_000;
 export const MAX_LEASE_MILLISECONDS = 86_400_000;
 export const DEFAULT_EVENT_PAGE_LIMIT = 100;
@@ -73,6 +76,39 @@ export interface ReconciliationResult {
   readonly repairedApprovals: number;
   readonly repairedJobs: number;
   readonly operatorAttentionRuns: number;
+}
+
+export interface WorkspaceAllocationEvidence {
+  readonly canonicalSourceRepositoryPath: string;
+  readonly gitCommonDirectory: string;
+  readonly resolvedBaseReference?: string;
+  readonly resolvedBaseCommit: string;
+  readonly baseResolvedAt: string;
+  readonly generatedBranchName: string;
+  readonly worktreePath: string;
+  readonly effectiveWorktreeRoot: string;
+  readonly ownershipClaimPath: string;
+  readonly ownershipMarkerDigest: string;
+}
+
+export interface WorkspaceReadyEvidence {
+  readonly canonicalWorktreePath: string;
+  readonly ownershipMarkerPath: string;
+  readonly ownershipMarkerDigest: string;
+  readonly gitMetadataState: string;
+  readonly currentObservedHead: string;
+  readonly currentObservedBranch: string;
+  readonly dirty: boolean;
+}
+
+export interface WorkspaceInspectionEvidence {
+  readonly matching: boolean;
+  readonly state: string;
+  readonly reason?: string;
+  readonly gitMetadataState: string;
+  readonly currentObservedHead?: string;
+  readonly currentObservedBranch?: string;
+  readonly dirty?: boolean;
 }
 
 type SqlRow = Record<string, unknown>;
@@ -138,11 +174,15 @@ const stageSequence: ReadonlyArray<StageKey> = [
 ];
 
 const jobTypeForStage = (stage: StageKey, validationCheckId?: string): JobType =>
-  stage === "validating" && validationCheckId
-    ? "command.execute"
-    : stage === "validating"
-      ? "simulation.request-human-review"
-      : "simulation.complete-stage";
+  stage === "allocating_workspace"
+    ? "workspace.allocate"
+    : stage === "workspace_cleanup"
+      ? "workspace.cleanup"
+      : stage === "validating" && validationCheckId
+        ? "command.execute"
+        : stage === "validating"
+          ? "simulation.request-human-review"
+          : "simulation.complete-stage";
 
 export class WorkflowEngine {
   readonly stateDirectory: string;
@@ -246,6 +286,7 @@ export class WorkflowEngine {
       };
       applyMigration(1, migration001Sql);
       applyMigration(2, migration002Sql);
+      applyMigration(3, migration003Sql);
       await ensurePrivateFile(databasePath, false);
       await ensurePrivateFile(`${databasePath}-wal`, false);
       await ensurePrivateFile(`${databasePath}-shm`, false);
@@ -306,6 +347,7 @@ export class WorkflowEngine {
       const runId = this.#idGenerator();
       const stageId = this.#idGenerator();
       const jobId = this.#idGenerator();
+      const workspaceId = input.validationCheckId ? this.#idGenerator() : undefined;
       const snapshotDigest = digestJson(input.projectSnapshot);
 
       const existingWorkItem = this.#database
@@ -365,10 +407,11 @@ export class WorkflowEngine {
           snapshotDigest,
           input.validationCheckId ?? null,
         );
+      const firstStageKey: StageKey = input.validationCheckId ? "allocating_workspace" : "planning";
       this.#insertStage({
         id: stageId,
         runId,
-        stageKey: "planning",
+        stageKey: firstStageKey,
         sequence: 1,
         now,
       });
@@ -376,10 +419,35 @@ export class WorkflowEngine {
         id: jobId,
         runId,
         stageId,
-        stageKey: "planning",
+        stageKey: firstStageKey,
         ...(input.validationCheckId ? { validationCheckId: input.validationCheckId } : {}),
         now,
       });
+      if (workspaceId) {
+        this.#database
+          .prepare(
+            `INSERT INTO workspaces
+              (id, workflow_run_id, project_id, type, status, source_repository_path,
+               requested_base_branch, configured_worktree_root, creation_intent_at,
+               version, created_at, updated_at)
+             VALUES (?, ?, ?, 'git_worktree', 'pending', ?, ?, ?, ?, 1, ?, ?)`,
+          )
+          .run(
+            workspaceId,
+            runId,
+            input.workItem.projectId,
+            input.projectSnapshot.repository.root,
+            input.projectSnapshot.repository.baseBranch,
+            input.projectSnapshot.repository.worktreeRoot,
+            now,
+            now,
+            now,
+          );
+        this.#insertEvent(runId, "workspace.requested", {
+          workspaceId,
+          requestedBaseBranch: input.projectSnapshot.repository.baseBranch,
+        });
+      }
       this.#insertEvent(runId, "workflow.created", {
         workItemId,
         projectId: input.workItem.projectId,
@@ -387,13 +455,13 @@ export class WorkflowEngine {
       });
       this.#insertEvent(runId, "stage.queued", {
         stageRunId: stageId,
-        stageKey: "planning",
+        stageKey: firstStageKey,
         sequence: 1,
       });
       this.#insertEvent(runId, "job.pending", {
         jobId,
         stageRunId: stageId,
-        jobType: jobTypeForStage("planning"),
+        jobType: jobTypeForStage(firstStageKey, input.validationCheckId),
       });
       this.#database
         .prepare(
@@ -506,6 +574,11 @@ export class WorkflowEngine {
         .prepare("SELECT * FROM command_runs WHERE workflow_run_id = ? ORDER BY created_at, id")
         .all(runId) as ReadonlyArray<SqlRow>
     ).map(this.#mapCommandRun);
+    const workspaces = (
+      this.#database
+        .prepare("SELECT * FROM workspaces WHERE workflow_run_id = ? ORDER BY created_at, id")
+        .all(runId) as ReadonlyArray<SqlRow>
+    ).map(this.#mapWorkspace);
     return {
       workItem: this.#mapWorkItem(workItemRow),
       workflowRun,
@@ -515,12 +588,738 @@ export class WorkflowEngine {
       approvals,
       artifacts,
       commands,
+      workspaces,
     };
   }
 
   readCommand(commandRunId: string): CommandRun {
     this.#assertOpen();
     return this.#findCommandRun(commandRunId);
+  }
+
+  readWorkspace(workspaceId: string): Workspace {
+    this.#assertOpen();
+    return this.#findWorkspace(workspaceId);
+  }
+
+  readWorkflowWorkspace(workflowRunId: string): Workspace {
+    this.#assertOpen();
+    const row = this.#database
+      .prepare("SELECT * FROM workspaces WHERE workflow_run_id = ?")
+      .get(workflowRunId) as SqlRow | undefined;
+    if (!row) throw new WorkflowEngineError("not_found", "Workflow workspace was not found.");
+    return this.#mapWorkspace(row);
+  }
+
+  listWorkspacesForReconciliation(): ReadonlyArray<Workspace> {
+    this.#assertOpen();
+    return (
+      this.#database
+        .prepare(
+          `SELECT * FROM workspaces
+           WHERE status IN ('pending','allocating','ready','retained','cleanup_pending','modified')
+           ORDER BY created_at, id`,
+        )
+        .all() as ReadonlyArray<SqlRow>
+    ).map(this.#mapWorkspace);
+  }
+
+  beginWorkspaceAllocation(input: {
+    readonly workspaceId: string;
+    readonly jobId: string;
+    readonly leaseOwner: string;
+    readonly expectedStageVersion: number;
+    readonly evidence: WorkspaceAllocationEvidence;
+  }): Workspace {
+    return this.#transaction(() => {
+      const workspace = this.#findWorkspace(input.workspaceId);
+      const job = this.#findJob(input.jobId);
+      const stage = this.#findStage(job.stageRunId);
+      const now = this.#now();
+      if (
+        workspace.status !== "pending" ||
+        job.jobType !== "workspace.allocate" ||
+        job.workflowRunId !== workspace.workflowRunId ||
+        job.status !== "claimed" ||
+        job.leaseOwner !== input.leaseOwner ||
+        job.leaseExpiration === undefined ||
+        job.leaseExpiration <= now ||
+        stage.version !== input.expectedStageVersion
+      ) {
+        throw new WorkflowEngineError(
+          "conflict",
+          "Workspace allocation no longer owns the current job and stage fence.",
+        );
+      }
+      this.#database
+        .prepare(
+          `UPDATE workspaces SET status = 'allocating', canonical_source_repository_path = ?,
+           git_common_directory = ?, resolved_base_reference = ?, resolved_base_commit = ?,
+           base_resolved_at = ?, generated_branch_name = ?, worktree_path = ?,
+           effective_worktree_root = ?, ownership_claim_path = ?, ownership_marker_digest = ?,
+           creation_started_at = ?,
+           git_metadata_state = 'allocation_planned', updated_at = ?, version = version + 1
+           WHERE id = ?`,
+        )
+        .run(
+          input.evidence.canonicalSourceRepositoryPath,
+          input.evidence.gitCommonDirectory,
+          input.evidence.resolvedBaseReference ?? null,
+          input.evidence.resolvedBaseCommit,
+          input.evidence.baseResolvedAt,
+          input.evidence.generatedBranchName,
+          input.evidence.worktreePath,
+          input.evidence.effectiveWorktreeRoot,
+          input.evidence.ownershipClaimPath,
+          input.evidence.ownershipMarkerDigest,
+          now,
+          now,
+          workspace.id,
+        );
+      this.#insertEvent(workspace.workflowRunId, "workspace.allocation_started", {
+        workspaceId: workspace.id,
+        requestedBaseBranch: workspace.requestedBaseBranch,
+        resolvedBaseCommit: input.evidence.resolvedBaseCommit,
+        generatedBranchName: input.evidence.generatedBranchName,
+      });
+      return this.#findWorkspace(workspace.id);
+    });
+  }
+
+  confirmWorkspaceAllocation(input: {
+    readonly workspaceId: string;
+    readonly jobId: string;
+    readonly leaseOwner: string;
+    readonly expectedStageVersion: number;
+    readonly evidence: WorkspaceReadyEvidence;
+  }): WorkflowDetail {
+    return this.#transaction(() => {
+      const workspace = this.#findWorkspace(input.workspaceId);
+      const job = this.#findJob(input.jobId);
+      const stage = this.#findStage(job.stageRunId);
+      const now = this.#now();
+      if (
+        workspace.status !== "allocating" ||
+        job.jobType !== "workspace.allocate" ||
+        job.status !== "claimed" ||
+        job.leaseOwner !== input.leaseOwner ||
+        job.leaseExpiration === undefined ||
+        job.leaseExpiration <= now ||
+        job.workflowRunId !== workspace.workflowRunId ||
+        stage.version !== input.expectedStageVersion
+      ) {
+        throw new WorkflowEngineError(
+          "conflict",
+          "Workspace allocation confirmation lost its fence.",
+        );
+      }
+      this.#database
+        .prepare(
+          `UPDATE workspaces SET status = 'ready', canonical_worktree_path = ?,
+           ownership_marker_path = ?, ownership_marker_digest = ?, ready_at = ?,
+           git_metadata_state = ?, current_observed_head = ?, current_observed_branch = ?,
+           dirty_state_json = ?, failure_classification = NULL,
+           operator_attention_reason = NULL, updated_at = ?, version = version + 1
+           WHERE id = ?`,
+        )
+        .run(
+          input.evidence.canonicalWorktreePath,
+          input.evidence.ownershipMarkerPath,
+          input.evidence.ownershipMarkerDigest,
+          now,
+          input.evidence.gitMetadataState,
+          input.evidence.currentObservedHead,
+          input.evidence.currentObservedBranch,
+          canonicalJson({ dirty: input.evidence.dirty }),
+          now,
+          workspace.id,
+        );
+      this.#completeWorkspaceAllocationTransition({ workspace, job, stage, now, input });
+      return this.readWorkflow(workspace.workflowRunId);
+    });
+  }
+
+  failWorkspaceAllocation(input: {
+    readonly workspaceId: string;
+    readonly jobId: string;
+    readonly leaseOwner: string;
+    readonly expectedStageVersion: number;
+    readonly failureClassification: string;
+    readonly operatorAttention: boolean;
+  }): WorkflowDetail {
+    return this.#transaction(() => {
+      const workspace = this.#findWorkspace(input.workspaceId);
+      const job = this.#findJob(input.jobId);
+      const stage = this.#findStage(job.stageRunId);
+      const now = this.#now();
+      if (
+        !["pending", "allocating"].includes(workspace.status) ||
+        job.jobType !== "workspace.allocate" ||
+        job.status !== "claimed" ||
+        job.leaseOwner !== input.leaseOwner ||
+        job.leaseExpiration === undefined ||
+        job.leaseExpiration <= now ||
+        stage.version !== input.expectedStageVersion ||
+        job.workflowRunId !== workspace.workflowRunId
+      ) {
+        throw new WorkflowEngineError("conflict", "Workspace allocation failure lost its fence.");
+      }
+      const status = input.operatorAttention ? "operator_attention" : "allocation_failed";
+      const runStatus = input.operatorAttention ? "operator_attention" : "failed";
+      this.#database
+        .prepare(
+          `UPDATE workspaces SET status = ?, failure_classification = ?,
+           operator_attention_reason = ?, updated_at = ?, version = version + 1 WHERE id = ?`,
+        )
+        .run(
+          status,
+          input.failureClassification,
+          input.operatorAttention ? input.failureClassification : null,
+          now,
+          workspace.id,
+        );
+      this.#database
+        .prepare(
+          `UPDATE job_intents SET status = 'failed', terminal_failure = ?, lease_owner = NULL,
+           lease_expiration = NULL, updated_at = ? WHERE id = ?`,
+        )
+        .run(input.failureClassification, now, job.id);
+      this.#database
+        .prepare(
+          `UPDATE attempts SET status = 'failed', completed_at = ?, failure_summary = ?
+           WHERE stage_run_id = ? AND attempt_number = ?`,
+        )
+        .run(now, input.failureClassification, stage.id, stage.currentAttempt);
+      this.#database
+        .prepare(
+          `UPDATE stage_runs SET status = ?, completed_at = ?, outcome = ?,
+           failure_classification = ?, version = version + 1 WHERE id = ?`,
+        )
+        .run(runStatus, now, runStatus, input.failureClassification, stage.id);
+      this.#database
+        .prepare(
+          `UPDATE workflow_runs SET status = ?, terminal_outcome = ?, updated_at = ?,
+           version = version + 1 WHERE id = ?`,
+        )
+        .run(runStatus, runStatus, now, workspace.workflowRunId);
+      this.#insertEvent(workspace.workflowRunId, `workspace.${status}`, {
+        workspaceId: workspace.id,
+        failureClassification: input.failureClassification,
+      });
+      this.#insertEvent(
+        workspace.workflowRunId,
+        input.operatorAttention ? "workflow.operator_attention" : "workflow.failed",
+        { workspaceId: workspace.id, failureClassification: input.failureClassification },
+      );
+      return this.readWorkflow(workspace.workflowRunId);
+    });
+  }
+
+  recoverWorkspaceAllocation(
+    workspaceId: string,
+    evidence: WorkspaceReadyEvidence,
+  ): WorkflowDetail {
+    return this.#transaction(() => {
+      const workspace = this.#findWorkspace(workspaceId);
+      if (workspace.status === "ready" || workspace.status === "retained") {
+        return this.readWorkflow(workspace.workflowRunId);
+      }
+      if (workspace.status !== "allocating") {
+        throw new WorkflowEngineError(
+          "invalid_transition",
+          "Only an allocating workspace can be recovered as ready.",
+        );
+      }
+      const jobRow = this.#database
+        .prepare(
+          `SELECT * FROM job_intents WHERE workflow_run_id = ?
+           AND job_type = 'workspace.allocate' ORDER BY created_at LIMIT 1`,
+        )
+        .get(workspace.workflowRunId) as SqlRow | undefined;
+      if (!jobRow)
+        throw new WorkflowEngineError("not_found", "Workspace allocation job was not found.");
+      const job = this.#mapJob(jobRow);
+      const stage = this.#findStage(job.stageRunId);
+      const run = this.#findWorkflowRun(workspace.workflowRunId);
+      if (
+        run.status !== "allocating_workspace" ||
+        job.workflowRunId !== run.id ||
+        !["pending", "claimed"].includes(job.status) ||
+        stage.stageKey !== "allocating_workspace" ||
+        !["queued", "running"].includes(stage.status)
+      ) {
+        throw new WorkflowEngineError(
+          "invalid_transition",
+          "Workspace allocation recovery cannot advance an inactive workflow, job, or stage.",
+        );
+      }
+      const now = this.#now();
+      this.#database
+        .prepare(
+          `UPDATE workspaces SET status = 'ready', canonical_worktree_path = ?,
+           ownership_marker_path = ?, ownership_marker_digest = ?, ready_at = COALESCE(ready_at, ?),
+           git_metadata_state = ?, current_observed_head = ?, current_observed_branch = ?,
+           dirty_state_json = ?, failure_classification = NULL,
+           operator_attention_reason = NULL, updated_at = ?, version = version + 1 WHERE id = ?`,
+        )
+        .run(
+          evidence.canonicalWorktreePath,
+          evidence.ownershipMarkerPath,
+          evidence.ownershipMarkerDigest,
+          now,
+          evidence.gitMetadataState,
+          evidence.currentObservedHead,
+          evidence.currentObservedBranch,
+          canonicalJson({ dirty: evidence.dirty }),
+          now,
+          workspace.id,
+        );
+      this.#completeWorkspaceAllocationTransition({
+        workspace,
+        job,
+        stage,
+        now,
+        input: {
+          leaseOwner: "workspace-reconciliation",
+          expectedStageVersion: stage.version,
+          evidence,
+        },
+      });
+      return this.readWorkflow(workspace.workflowRunId);
+    });
+  }
+
+  resetInterruptedWorkspaceAllocation(workspaceId: string): Workspace {
+    return this.#transaction(() => {
+      const workspace = this.#findWorkspace(workspaceId);
+      if (workspace.status !== "allocating") {
+        throw new WorkflowEngineError(
+          "invalid_transition",
+          "Only an allocating workspace can return to pending.",
+        );
+      }
+      const now = this.#now();
+      this.#database
+        .prepare(
+          `UPDATE workspaces SET status = 'pending', creation_started_at = NULL,
+           git_metadata_state = 'no_side_effect_observed', updated_at = ?,
+           version = version + 1 WHERE id = ?`,
+        )
+        .run(now, workspace.id);
+      this.#database
+        .prepare(
+          `UPDATE job_intents SET status = 'pending', lease_owner = NULL, lease_expiration = NULL,
+           available_after = ?, updated_at = ? WHERE workflow_run_id = ?
+           AND job_type = 'workspace.allocate' AND status IN ('pending','claimed')`,
+        )
+        .run(now, now, workspace.workflowRunId);
+      this.#database
+        .prepare(
+          `UPDATE attempts SET status = 'failed', completed_at = ?,
+           failure_summary = 'Worker stopped before any workspace side effect was observed.'
+           WHERE stage_run_id IN (
+             SELECT stage_run_id FROM job_intents WHERE workflow_run_id = ?
+             AND job_type = 'workspace.allocate'
+           ) AND status = 'running'`,
+        )
+        .run(now, workspace.workflowRunId);
+      this.#database
+        .prepare(
+          `UPDATE stage_runs SET status = 'queued', version = version + 1 WHERE id IN (
+             SELECT stage_run_id FROM job_intents WHERE workflow_run_id = ?
+             AND job_type = 'workspace.allocate'
+           )`,
+        )
+        .run(workspace.workflowRunId);
+      this.#insertEvent(workspace.workflowRunId, "workspace.allocation_retryable", {
+        workspaceId: workspace.id,
+        reason: "no_side_effect_observed",
+      });
+      return this.#findWorkspace(workspace.id);
+    });
+  }
+
+  reconcileWorkspaceRemoved(workspaceId: string): Workspace {
+    return this.#transaction(() => {
+      const workspace = this.#findWorkspace(workspaceId);
+      if (workspace.status === "removed") return workspace;
+      if (workspace.status !== "cleanup_pending") {
+        throw new WorkflowEngineError(
+          "invalid_transition",
+          "Only cleanup-pending workspace evidence can reconcile as removed.",
+        );
+      }
+      const now = this.#now();
+      this.#database
+        .prepare(
+          `UPDATE workspaces SET status = 'removed', cleanup_completed_at = ?,
+           git_metadata_state = 'absent', updated_at = ?, version = version + 1 WHERE id = ?`,
+        )
+        .run(now, now, workspace.id);
+      this.#database
+        .prepare(
+          `UPDATE job_intents SET status = 'completed', lease_owner = NULL, lease_expiration = NULL,
+           completion_metadata_json = ?, updated_at = ? WHERE workflow_run_id = ?
+           AND job_type = 'workspace.cleanup' AND status IN ('pending','claimed')`,
+        )
+        .run(
+          canonicalJson({ workspaceId: workspace.id, removed: true, reconciled: true }),
+          now,
+          workspace.workflowRunId,
+        );
+      this.#database
+        .prepare(
+          `UPDATE attempts SET status = 'completed', completed_at = ?
+           WHERE stage_run_id IN (
+             SELECT stage_run_id FROM job_intents WHERE workflow_run_id = ?
+             AND job_type = 'workspace.cleanup'
+           ) AND status = 'running'`,
+        )
+        .run(now, workspace.workflowRunId);
+      this.#database
+        .prepare(
+          `UPDATE stage_runs SET status = 'completed', completed_at = ?, outcome = 'removed',
+           version = version + 1 WHERE id IN (
+             SELECT stage_run_id FROM job_intents WHERE workflow_run_id = ?
+             AND job_type = 'workspace.cleanup'
+           ) AND status IN ('queued','running')`,
+        )
+        .run(now, workspace.workflowRunId);
+      this.#insertEvent(workspace.workflowRunId, "workspace.removed", {
+        workspaceId: workspace.id,
+        reconciled: true,
+        branchRetained: true,
+      });
+      return this.#findWorkspace(workspace.id);
+    });
+  }
+
+  recordWorkspaceInspection(workspaceId: string, evidence: WorkspaceInspectionEvidence): Workspace {
+    return this.#transaction(() => {
+      const workspace = this.#findWorkspace(workspaceId);
+      const now = this.#now();
+      if (evidence.matching) {
+        this.#database
+          .prepare(
+            `UPDATE workspaces SET git_metadata_state = ?, current_observed_head = ?,
+             current_observed_branch = ?, dirty_state_json = ?, updated_at = ?,
+             version = version + 1 WHERE id = ?`,
+          )
+          .run(
+            evidence.gitMetadataState,
+            evidence.currentObservedHead ?? null,
+            evidence.currentObservedBranch ?? null,
+            canonicalJson({ dirty: evidence.dirty ?? false }),
+            now,
+            workspace.id,
+          );
+        return this.#findWorkspace(workspace.id);
+      }
+      const workspaceStatus =
+        evidence.state === "missing"
+          ? "missing"
+          : evidence.state === "ownership_mismatch"
+            ? "ownership_mismatch"
+            : "operator_attention";
+      this.#database
+        .prepare(
+          `UPDATE workspaces SET status = ?, operator_attention_reason = ?,
+           git_metadata_state = ?, current_observed_head = ?, current_observed_branch = ?,
+           dirty_state_json = ?, updated_at = ?, version = version + 1 WHERE id = ?`,
+        )
+        .run(
+          workspaceStatus,
+          evidence.reason ?? evidence.state,
+          evidence.gitMetadataState,
+          evidence.currentObservedHead ?? null,
+          evidence.currentObservedBranch ?? null,
+          canonicalJson({ dirty: evidence.dirty ?? false }),
+          now,
+          workspace.id,
+        );
+      const run = this.#findWorkflowRun(workspace.workflowRunId);
+      if (!terminalRunStatuses.has(run.status)) {
+        const reason = evidence.reason ?? evidence.state;
+        const activeCommands = (
+          this.#database
+            .prepare(
+              `SELECT * FROM command_runs WHERE workflow_run_id = ?
+               AND status IN ('pending','starting','running','cancelling')`,
+            )
+            .all(run.id) as ReadonlyArray<SqlRow>
+        ).map(this.#mapCommandRun);
+        this.#database
+          .prepare(
+            `UPDATE workflow_runs SET status = 'operator_attention',
+             terminal_outcome = 'operator_attention', updated_at = ?, version = version + 1
+             WHERE id = ?`,
+          )
+          .run(now, run.id);
+        this.#database
+          .prepare(
+            `UPDATE job_intents SET status = 'failed', terminal_failure = ?, lease_owner = NULL,
+             lease_expiration = NULL, updated_at = ?
+             WHERE workflow_run_id = ? AND status IN ('pending','claimed')`,
+          )
+          .run(reason, now, run.id);
+        this.#database
+          .prepare(
+            `UPDATE attempts SET status = 'failed', completed_at = ?, failure_summary = ?
+             WHERE stage_run_id IN (
+               SELECT id FROM stage_runs WHERE workflow_run_id = ?
+             ) AND status = 'running'`,
+          )
+          .run(now, reason, run.id);
+        this.#database
+          .prepare(
+            `UPDATE command_runs SET status = 'operator_attention',
+             outcome = 'operator_attention', completed_at = ?, failure_classification = ?,
+             version = version + 1 WHERE workflow_run_id = ?
+             AND status IN ('pending','starting','running','cancelling')`,
+          )
+          .run(now, reason, run.id);
+        this.#database
+          .prepare(
+            `UPDATE stage_runs SET status = 'operator_attention', completed_at = ?,
+             outcome = 'operator_attention', failure_classification = ?, version = version + 1
+             WHERE workflow_run_id = ? AND status IN ('queued','running','waiting_approval')`,
+          )
+          .run(now, reason, run.id);
+        this.#database
+          .prepare(
+            `UPDATE approvals SET status = 'cancelled', resolved_at = ?,
+             resolved_by = 'workspace-reconciliation'
+             WHERE workflow_run_id = ? AND status = 'pending'`,
+          )
+          .run(now, run.id);
+        for (const command of activeCommands) {
+          this.#insertEvent(run.id, "command.operator_attention_required", {
+            commandRunId: command.id,
+            reason,
+          });
+        }
+        this.#insertEvent(run.id, "workflow.operator_attention", {
+          workspaceId: workspace.id,
+          reason,
+        });
+      }
+      this.#insertEvent(run.id, "workspace.operator_attention_required", {
+        workspaceId: workspace.id,
+        state: evidence.state,
+        reason: evidence.reason ?? evidence.state,
+      });
+      return this.#findWorkspace(workspace.id);
+    });
+  }
+
+  retainWorkspace(workspaceId: string): Workspace {
+    return this.#transaction(() => {
+      const workspace = this.#findWorkspace(workspaceId);
+      if (workspace.status === "retained") return workspace;
+      if (workspace.status !== "ready") {
+        throw new WorkflowEngineError(
+          "invalid_transition",
+          "Only a ready workspace can be retained.",
+        );
+      }
+      const now = this.#now();
+      this.#database
+        .prepare(
+          `UPDATE workspaces SET status = 'retained', retained_at = ?, updated_at = ?,
+           version = version + 1 WHERE id = ?`,
+        )
+        .run(now, now, workspace.id);
+      this.#insertEvent(workspace.workflowRunId, "workspace.retained", {
+        workspaceId: workspace.id,
+      });
+      return this.#findWorkspace(workspace.id);
+    });
+  }
+
+  requestWorkspaceCleanup(workspaceId: string, input: WorkspaceActionRequest): Workspace {
+    return this.#transaction(() => {
+      const workspace = this.#findWorkspace(workspaceId);
+      const requestDigest = digestJson({ workspaceId: workspace.id, request: input });
+      const existing = this.#database
+        .prepare(
+          `SELECT request_digest FROM idempotency_records
+           WHERE scope = 'workspace.cleanup' AND key = ?`,
+        )
+        .get(input.idempotencyKey) as SqlRow | undefined;
+      if (existing) {
+        if (asString(existing, "request_digest") !== requestDigest) {
+          throw new WorkflowEngineError("conflict", "Cleanup idempotency key has different input.");
+        }
+        return workspace;
+      }
+      if (workspace.status === "removed" || workspace.status === "cleanup_pending") {
+        throw new WorkflowEngineError(
+          "invalid_transition",
+          "Workspace cleanup state requires the original idempotency key.",
+        );
+      }
+      if (!["ready", "retained", "modified", "cleanup_failed"].includes(workspace.status)) {
+        throw new WorkflowEngineError(
+          "invalid_transition",
+          "Workspace is not eligible for cleanup.",
+        );
+      }
+      const run = this.#findWorkflowRun(workspace.workflowRunId);
+      if (!terminalRunStatuses.has(run.status)) {
+        throw new WorkflowEngineError(
+          "invalid_transition",
+          "An active or human-review workflow retains its workspace.",
+        );
+      }
+      const activeCommand = this.#database
+        .prepare(
+          `SELECT id FROM command_runs WHERE workflow_run_id = ?
+           AND status IN ('pending','starting','running','cancelling') LIMIT 1`,
+        )
+        .get(workspace.workflowRunId);
+      if (activeCommand) {
+        throw new WorkflowEngineError(
+          "conflict",
+          "Workspace cleanup cannot race an active command.",
+        );
+      }
+      const now = this.#now();
+      const stageId = this.#idGenerator();
+      const jobId = this.#idGenerator();
+      const sequenceRow = this.#database
+        .prepare(
+          "SELECT COALESCE(MAX(sequence), 0) AS sequence FROM stage_runs WHERE workflow_run_id = ?",
+        )
+        .get(workspace.workflowRunId) as SqlRow;
+      this.#insertStage({
+        id: stageId,
+        runId: workspace.workflowRunId,
+        stageKey: "workspace_cleanup",
+        sequence: asNumber(sequenceRow, "sequence") + 1,
+        now,
+      });
+      this.#insertJob({
+        id: jobId,
+        runId: workspace.workflowRunId,
+        stageId,
+        stageKey: "workspace_cleanup",
+        now,
+      });
+      this.#database
+        .prepare(
+          `UPDATE workspaces SET status = 'cleanup_pending', cleanup_requested_at = ?,
+           updated_at = ?, version = version + 1 WHERE id = ?`,
+        )
+        .run(now, now, workspace.id);
+      this.#database
+        .prepare(
+          `INSERT INTO idempotency_records
+            (scope, key, request_digest, stored_result_reference, created_at)
+           VALUES ('workspace.cleanup', ?, ?, ?, ?)`,
+        )
+        .run(input.idempotencyKey, requestDigest, workspace.id, now);
+      this.#insertEvent(workspace.workflowRunId, "workspace.cleanup_requested", {
+        workspaceId: workspace.id,
+        requestedBy: input.requestedBy,
+        jobId,
+      });
+      return this.#findWorkspace(workspace.id);
+    });
+  }
+
+  completeWorkspaceCleanup(input: {
+    readonly workspaceId: string;
+    readonly jobId: string;
+    readonly leaseOwner: string;
+    readonly expectedStageVersion: number;
+    readonly removed: boolean;
+    readonly reason?: string;
+  }): Workspace {
+    return this.#transaction(() => {
+      const workspace = this.#findWorkspace(input.workspaceId);
+      const job = this.#findJob(input.jobId);
+      const stage = this.#findStage(job.stageRunId);
+      const now = this.#now();
+      if (
+        workspace.status !== "cleanup_pending" ||
+        job.jobType !== "workspace.cleanup" ||
+        job.workflowRunId !== workspace.workflowRunId ||
+        job.status !== "claimed" ||
+        job.leaseOwner !== input.leaseOwner ||
+        job.leaseExpiration === undefined ||
+        job.leaseExpiration <= now ||
+        stage.version !== input.expectedStageVersion
+      ) {
+        throw new WorkflowEngineError("conflict", "Workspace cleanup lost its durable fence.");
+      }
+      const status = input.removed
+        ? "removed"
+        : input.reason === "modified"
+          ? "modified"
+          : input.reason === "ownership_mismatch"
+            ? "ownership_mismatch"
+            : "cleanup_failed";
+      this.#database
+        .prepare(
+          `UPDATE workspaces SET status = ?, cleanup_completed_at = ?,
+           failure_classification = ?, operator_attention_reason = ?, updated_at = ?,
+           version = version + 1 WHERE id = ?`,
+        )
+        .run(
+          status,
+          input.removed ? now : null,
+          input.removed ? null : (input.reason ?? "cleanup_failed"),
+          input.removed ? null : (input.reason ?? "cleanup_failed"),
+          now,
+          workspace.id,
+        );
+      this.#database
+        .prepare(
+          `UPDATE job_intents SET status = ?, terminal_failure = ?, lease_owner = NULL,
+           lease_expiration = NULL, completion_metadata_json = ?, updated_at = ? WHERE id = ?`,
+        )
+        .run(
+          input.removed ? "completed" : "failed",
+          input.removed ? null : (input.reason ?? "cleanup_failed"),
+          canonicalJson({
+            workspaceId: workspace.id,
+            removed: input.removed,
+            reason: input.reason ?? null,
+          }),
+          now,
+          job.id,
+        );
+      this.#database
+        .prepare(
+          `UPDATE attempts SET status = ?, completed_at = ?, failure_summary = ?
+           WHERE stage_run_id = ? AND attempt_number = ?`,
+        )
+        .run(
+          input.removed ? "completed" : "failed",
+          now,
+          input.removed ? null : (input.reason ?? "cleanup_failed"),
+          stage.id,
+          stage.currentAttempt,
+        );
+      this.#database
+        .prepare(
+          `UPDATE stage_runs SET status = ?, completed_at = ?, outcome = ?,
+           failure_classification = ?, version = version + 1 WHERE id = ?`,
+        )
+        .run(
+          input.removed ? "completed" : "failed",
+          now,
+          status,
+          input.removed ? null : (input.reason ?? "cleanup_failed"),
+          stage.id,
+        );
+      this.#insertEvent(
+        workspace.workflowRunId,
+        input.removed ? "workspace.removed" : "workspace.cleanup_refused",
+        { workspaceId: workspace.id, reason: input.reason ?? null, branchRetained: true },
+      );
+      return this.#findWorkspace(workspace.id);
+    });
   }
 
   claimNextJob(
@@ -547,8 +1346,24 @@ export class WorkflowEngine {
           `SELECT job_intents.*
            FROM job_intents
            JOIN workflow_runs ON workflow_runs.id = job_intents.workflow_run_id
-           WHERE workflow_runs.cancellation_requested_at IS NULL
-             AND workflow_runs.status NOT IN ('completed','rejected','failed','cancelled','operator_attention')
+           WHERE (
+               job_intents.job_type = 'workspace.cleanup'
+               OR (
+                 workflow_runs.cancellation_requested_at IS NULL
+                 AND workflow_runs.status NOT IN ('completed','rejected','failed','cancelled','operator_attention')
+               )
+             )
+             AND (
+               job_intents.job_type <> 'command.execute'
+               OR EXISTS (
+                 SELECT 1 FROM workspaces
+                 JOIN command_runs ON command_runs.workflow_run_id = workspaces.workflow_run_id
+                 WHERE workspaces.workflow_run_id = job_intents.workflow_run_id
+                   AND command_runs.stage_run_id = job_intents.stage_run_id
+                   AND workspaces.status IN ('ready','retained')
+                   AND command_runs.execution_root = workspaces.canonical_worktree_path
+               )
+             )
              AND (
                (job_intents.status = 'pending' AND job_intents.available_after <= ?)
                OR (job_intents.status = 'claimed' AND job_intents.lease_expiration <= ?)
@@ -617,11 +1432,13 @@ export class WorkflowEngine {
         )
         .run(attemptNumber, now, stageId);
       const stage = this.#findStage(stageId);
-      this.#database
-        .prepare(
-          `UPDATE workflow_runs SET status = ?, updated_at = ?, version = version + 1 WHERE id = ?`,
-        )
-        .run(stage.stageKey, now, stage.workflowRunId);
+      if (asString(row, "job_type") !== "workspace.cleanup") {
+        this.#database
+          .prepare(
+            `UPDATE workflow_runs SET status = ?, updated_at = ?, version = version + 1 WHERE id = ?`,
+          )
+          .run(stage.stageKey, now, stage.workflowRunId);
+      }
       this.#insertEvent(stage.workflowRunId, "job.claimed", {
         jobId,
         stageRunId: stageId,
@@ -685,6 +1502,12 @@ export class WorkflowEngine {
     const completionDigest = digestJson(completionMetadata);
     return this.#transaction(() => {
       const job = this.#findJob(jobId);
+      if (!job.jobType.startsWith("simulation.")) {
+        throw new WorkflowEngineError(
+          "invalid_transition",
+          "Only simulation jobs may use generic stage completion.",
+        );
+      }
       if (job.status === "completed") {
         const completion = this.#database
           .prepare(
@@ -883,6 +1706,26 @@ export class WorkflowEngine {
         );
       }
       const stage = this.#findStage(command.stageRunId);
+      const workspaceRow = this.#database
+        .prepare("SELECT * FROM workspaces WHERE workflow_run_id = ?")
+        .get(command.workflowRunId) as SqlRow | undefined;
+      if (!workspaceRow) {
+        throw new WorkflowEngineError(
+          "invalid_transition",
+          "Legacy command runs without a durable workspace cannot start.",
+        );
+      }
+      const workspace = this.#mapWorkspace(workspaceRow);
+      if (
+        !["ready", "retained"].includes(workspace.status) ||
+        !workspace.canonicalWorktreePath ||
+        command.executionRoot !== workspace.canonicalWorktreePath
+      ) {
+        throw new WorkflowEngineError(
+          "conflict",
+          "Command execution root does not match its ready durable workspace.",
+        );
+      }
       const attempt = this.#findAttempt(input.attemptId);
       if (
         attempt.stageRunId !== stage.id ||
@@ -1176,6 +2019,7 @@ export class WorkflowEngine {
             outcome: input.result.outcome,
           },
         );
+        this.#retainWorkspaceInTransaction(run.id, now);
         return this.readWorkflow(run.id);
       }
 
@@ -1222,6 +2066,7 @@ export class WorkflowEngine {
         stageRunId: reviewStageId,
         approvalType: "human_review",
       });
+      this.#retainWorkspaceInTransaction(run.id, now);
       return this.readWorkflow(run.id);
     });
   }
@@ -1302,6 +2147,7 @@ export class WorkflowEngine {
         commandRunId: command.id,
         outcome: "spawn_failed",
       });
+      this.#retainWorkspaceInTransaction(command.workflowRunId, now);
       return this.readWorkflow(command.workflowRunId);
     });
   }
@@ -1408,6 +2254,10 @@ export class WorkflowEngine {
           stderrTruncated: result.stderr.truncated,
         });
       }
+      this.#scheduleCancelledWorkspaceCleanupInTransaction(
+        command.workflowRunId,
+        "workflow-cancel",
+      );
       return this.#findCommandRun(command.id);
     });
   }
@@ -1547,6 +2397,7 @@ export class WorkflowEngine {
           failureSummary: input.failureSummary,
           classification: input.retryable ? "maximum_attempts_exhausted" : "terminal",
         });
+        this.#retainWorkspaceInTransaction(job.workflowRunId, now);
       }
       return this.#findJob(job.id);
     });
@@ -1674,6 +2525,56 @@ export class WorkflowEngine {
       let repairedJobs = 0;
       let operatorAttentionRuns = 0;
 
+      const unsafeLegacyCommands = this.#database
+        .prepare(
+          `SELECT command_runs.* FROM command_runs
+           LEFT JOIN workspaces ON workspaces.workflow_run_id = command_runs.workflow_run_id
+           WHERE command_runs.status = 'pending'
+             AND (
+               workspaces.id IS NULL
+               OR workspaces.status NOT IN ('ready','retained')
+               OR workspaces.canonical_worktree_path IS NULL
+               OR command_runs.execution_root <> workspaces.canonical_worktree_path
+             )
+           ORDER BY command_runs.id`,
+        )
+        .all() as ReadonlyArray<SqlRow>;
+      for (const row of unsafeLegacyCommands) {
+        const command = this.#mapCommandRun(row);
+        const reason = "legacy_command_missing_owned_workspace";
+        this.#database
+          .prepare(
+            `UPDATE command_runs SET status = 'operator_attention', outcome = 'operator_attention',
+             completed_at = ?, failure_classification = ?, version = version + 1 WHERE id = ?`,
+          )
+          .run(now, reason, command.id);
+        this.#database
+          .prepare(
+            `UPDATE job_intents SET status = 'failed', terminal_failure = ?, updated_at = ?
+             WHERE stage_run_id = ? AND status IN ('pending','claimed')`,
+          )
+          .run(reason, now, command.stageRunId);
+        this.#database
+          .prepare(
+            `UPDATE stage_runs SET status = 'operator_attention', completed_at = ?,
+             outcome = 'operator_attention', failure_classification = ?, version = version + 1
+             WHERE id = ?`,
+          )
+          .run(now, reason, command.stageRunId);
+        this.#database
+          .prepare(
+            `UPDATE workflow_runs SET status = 'operator_attention',
+             terminal_outcome = 'operator_attention', updated_at = ?, version = version + 1
+             WHERE id = ?`,
+          )
+          .run(now, command.workflowRunId);
+        this.#insertEvent(command.workflowRunId, "command.operator_attention_required", {
+          commandRunId: command.id,
+          reason,
+        });
+        operatorAttentionRuns += 1;
+      }
+
       const uncertainCommands = this.#database
         .prepare(
           `SELECT * FROM command_runs
@@ -1768,6 +2669,7 @@ export class WorkflowEngine {
           `SELECT job_intents.id, job_intents.workflow_run_id
            FROM job_intents JOIN workflow_runs ON workflow_runs.id = job_intents.workflow_run_id
            WHERE workflow_runs.cancellation_requested_at IS NOT NULL
+             AND job_intents.job_type <> 'workspace.cleanup'
              AND job_intents.status IN ('pending','claimed')`,
         )
         .all() as ReadonlyArray<SqlRow>;
@@ -1903,6 +2805,118 @@ export class WorkflowEngine {
     }
   }
 
+  #completeWorkspaceAllocationTransition(input: {
+    readonly workspace: Workspace;
+    readonly job: JobIntent;
+    readonly stage: StageRun;
+    readonly now: string;
+    readonly input: {
+      readonly leaseOwner: string;
+      readonly expectedStageVersion: number;
+      readonly evidence: WorkspaceReadyEvidence;
+    };
+  }): void {
+    const run = this.#findWorkflowRun(input.workspace.workflowRunId);
+    if (!run.validationCheckId) {
+      throw new WorkflowEngineError(
+        "invalid_transition",
+        "A workspace-backed workflow requires a declared validation check.",
+      );
+    }
+    this.#database
+      .prepare(
+        `UPDATE job_intents SET status = 'completed', lease_owner = NULL,
+         lease_expiration = NULL, completion_metadata_json = ?, completion_owner = ?,
+         completion_stage_version = ?, completion_digest = ?, updated_at = ? WHERE id = ?`,
+      )
+      .run(
+        canonicalJson({ workspaceId: input.workspace.id, status: "ready" }),
+        input.input.leaseOwner,
+        input.input.expectedStageVersion,
+        digestJson({ workspaceId: input.workspace.id, evidence: input.input.evidence }),
+        input.now,
+        input.job.id,
+      );
+    this.#database
+      .prepare(
+        `UPDATE attempts SET status = 'completed', completed_at = ?
+         WHERE stage_run_id = ? AND attempt_number = ?`,
+      )
+      .run(input.now, input.stage.id, input.stage.currentAttempt);
+    this.#database
+      .prepare(
+        `UPDATE stage_runs SET status = 'completed', completed_at = ?, outcome = 'succeeded',
+         version = version + 1 WHERE id = ?`,
+      )
+      .run(input.now, input.stage.id);
+    const validationStageId = this.#idGenerator();
+    const commandId = this.#idGenerator();
+    const commandJobId = this.#idGenerator();
+    this.#insertStage({
+      id: validationStageId,
+      runId: run.id,
+      stageKey: "validating",
+      sequence: input.stage.sequence + 1,
+      now: input.now,
+    });
+    this.#insertValidationCommand({
+      id: commandId,
+      run,
+      stageId: validationStageId,
+      commandId: run.validationCheckId,
+      executionRoot: input.input.evidence.canonicalWorktreePath,
+      now: input.now,
+    });
+    this.#insertJob({
+      id: commandJobId,
+      runId: run.id,
+      stageId: validationStageId,
+      stageKey: "validating",
+      validationCheckId: run.validationCheckId,
+      now: input.now,
+    });
+    this.#database
+      .prepare(
+        `UPDATE workflow_runs SET status = 'validating', updated_at = ?, version = version + 1
+         WHERE id = ?`,
+      )
+      .run(input.now, run.id);
+    this.#insertEvent(run.id, "workspace.ready", {
+      workspaceId: input.workspace.id,
+      worktreePath: input.input.evidence.canonicalWorktreePath,
+      baseCommit: this.#findWorkspace(input.workspace.id).resolvedBaseCommit,
+    });
+    this.#insertEvent(run.id, "stage.completed", {
+      stageRunId: input.stage.id,
+      stageKey: input.stage.stageKey,
+    });
+    this.#insertEvent(run.id, "stage.queued", {
+      stageRunId: validationStageId,
+      stageKey: "validating",
+      sequence: input.stage.sequence + 1,
+    });
+    this.#insertEvent(run.id, "job.pending", {
+      jobId: commandJobId,
+      stageRunId: validationStageId,
+      jobType: "command.execute",
+    });
+  }
+
+  #retainWorkspaceInTransaction(runId: string, now: string): void {
+    const row = this.#database
+      .prepare("SELECT id FROM workspaces WHERE workflow_run_id = ? AND status = 'ready'")
+      .get(runId) as SqlRow | undefined;
+    if (!row) return;
+    const workspaceId = asString(row, "id");
+    this.#database
+      .prepare(
+        `UPDATE workspaces SET status = 'retained', retained_at = ?, updated_at = ?,
+         version = version + 1 WHERE id = ?`,
+      )
+      .run(now, now, workspaceId);
+    this.#insertEvent(runId, "workspace.retained", { workspaceId });
+  }
+
   #assertCreateInput(input: WorkflowCreateRequest): void {
     if (
       input.idempotencyKey.trim().length === 0 ||
@@ -1969,6 +2983,7 @@ export class WorkflowEngine {
     readonly stageKey: StageKey;
     readonly validationCheckId?: string;
     readonly now: string;
+    readonly availableAfter?: string;
   }): void {
     const jobType = jobTypeForStage(input.stageKey, input.validationCheckId);
     this.#database
@@ -1990,7 +3005,7 @@ export class WorkflowEngine {
             : {}),
         }),
         `${input.runId}:${input.stageId}:${jobType}`,
-        input.now,
+        input.availableAfter ?? input.now,
         input.now,
         input.now,
       );
@@ -2001,6 +3016,7 @@ export class WorkflowEngine {
     readonly run: WorkflowRun;
     readonly stageId: string;
     readonly commandId: string;
+    readonly executionRoot?: string;
     readonly now: string;
   }): void {
     const command = resolveSnapshotCommand({
@@ -2008,6 +3024,8 @@ export class WorkflowEngine {
       category: "check",
       commandId: input.commandId,
     });
+    const executionRoot = input.executionRoot ?? input.run.projectSnapshot.repository.root;
+    const resolvedWorkingDirectory = NodePath.resolve(executionRoot, command.workingDirectory);
     this.#database
       .prepare(
         `INSERT INTO command_runs
@@ -2023,8 +3041,8 @@ export class WorkflowEngine {
         input.stageId,
         input.commandId,
         canonicalJson(command),
-        input.run.projectSnapshot.repository.root,
-        command.resolvedWorkingDirectory,
+        executionRoot,
+        resolvedWorkingDirectory,
         command.executable,
         canonicalJson(command.args),
         canonicalJson(command.environment.map((reference) => reference.name)),
@@ -2121,6 +3139,63 @@ export class WorkflowEngine {
         requestedBy,
       });
     }
+    const hasRunningProcess = activeCommands.some((command) =>
+      ["starting", "running", "cancelling"].includes(command.status),
+    );
+    if (hasRunningProcess) {
+      this.#retainWorkspaceInTransaction(runId, now);
+      this.#insertEvent(runId, "workspace.cleanup_deferred", {
+        reason: "command_process_must_settle",
+      });
+    } else {
+      this.#scheduleCancelledWorkspaceCleanupInTransaction(runId, requestedBy);
+    }
+  }
+
+  #scheduleCancelledWorkspaceCleanupInTransaction(runId: string, requestedBy: string): void {
+    const workspaceRow = this.#database
+      .prepare(
+        `SELECT * FROM workspaces WHERE workflow_run_id = ?
+         AND status IN ('ready','retained')`,
+      )
+      .get(runId) as SqlRow | undefined;
+    if (!workspaceRow) return;
+    const existing = this.#database
+      .prepare(
+        `SELECT id FROM job_intents WHERE workflow_run_id = ?
+         AND job_type = 'workspace.cleanup' AND status IN ('pending','claimed') LIMIT 1`,
+      )
+      .get(runId);
+    if (existing) return;
+    const workspace = this.#mapWorkspace(workspaceRow);
+    const now = this.#now();
+    const stageId = this.#idGenerator();
+    const jobId = this.#idGenerator();
+    const sequenceRow = this.#database
+      .prepare(
+        "SELECT COALESCE(MAX(sequence), 0) AS sequence FROM stage_runs WHERE workflow_run_id = ?",
+      )
+      .get(runId) as SqlRow;
+    this.#insertStage({
+      id: stageId,
+      runId,
+      stageKey: "workspace_cleanup",
+      sequence: asNumber(sequenceRow, "sequence") + 1,
+      now,
+    });
+    this.#insertJob({ id: jobId, runId, stageId, stageKey: "workspace_cleanup", now });
+    this.#database
+      .prepare(
+        `UPDATE workspaces SET status = 'cleanup_pending', cleanup_requested_at = ?,
+         updated_at = ?, version = version + 1 WHERE id = ?`,
+      )
+      .run(now, now, workspace.id);
+    this.#insertEvent(runId, "workspace.cleanup_requested", {
+      workspaceId: workspace.id,
+      requestedBy,
+      jobId,
+      automatic: true,
+    });
   }
 
   #readCreateResult(runId: string): Omit<WorkflowCreateResult, "replayed"> {
@@ -2176,6 +3251,14 @@ export class WorkflowEngine {
       .get(commandRunId) as SqlRow | undefined;
     if (!row) throw new WorkflowEngineError("not_found", "Command run was not found.");
     return this.#mapCommandRun(row);
+  }
+
+  #findWorkspace(workspaceId: string): Workspace {
+    const row = this.#database.prepare("SELECT * FROM workspaces WHERE id = ?").get(workspaceId) as
+      | SqlRow
+      | undefined;
+    if (!row) throw new WorkflowEngineError("not_found", "Workspace was not found.");
+    return this.#mapWorkspace(row);
   }
 
   #findApproval(approvalId: string): Approval {
@@ -2389,6 +3472,88 @@ export class WorkflowEngine {
       ? { failureClassification: optionalString(row, "failure_classification") }
       : {}),
     version: asNumber(row, "version"),
+  });
+
+  readonly #mapWorkspace = (row: SqlRow): Workspace => ({
+    id: asString(row, "id"),
+    workflowRunId: asString(row, "workflow_run_id"),
+    projectId: asString(row, "project_id"),
+    type: "git_worktree",
+    status: asString(row, "status") as Workspace["status"],
+    sourceRepositoryPath: asString(row, "source_repository_path"),
+    ...(optionalString(row, "canonical_source_repository_path")
+      ? { canonicalSourceRepositoryPath: optionalString(row, "canonical_source_repository_path") }
+      : {}),
+    ...(optionalString(row, "git_common_directory")
+      ? { gitCommonDirectory: optionalString(row, "git_common_directory") }
+      : {}),
+    requestedBaseBranch: asString(row, "requested_base_branch"),
+    ...(optionalString(row, "resolved_base_reference")
+      ? { resolvedBaseReference: optionalString(row, "resolved_base_reference") }
+      : {}),
+    ...(optionalString(row, "resolved_base_commit")
+      ? { resolvedBaseCommit: optionalString(row, "resolved_base_commit") }
+      : {}),
+    ...(optionalString(row, "base_resolved_at")
+      ? { baseResolvedAt: optionalString(row, "base_resolved_at") }
+      : {}),
+    ...(optionalString(row, "generated_branch_name")
+      ? { generatedBranchName: optionalString(row, "generated_branch_name") }
+      : {}),
+    ...(optionalString(row, "worktree_path")
+      ? { worktreePath: optionalString(row, "worktree_path") }
+      : {}),
+    ...(optionalString(row, "canonical_worktree_path")
+      ? { canonicalWorktreePath: optionalString(row, "canonical_worktree_path") }
+      : {}),
+    configuredWorktreeRoot: asString(row, "configured_worktree_root"),
+    ...(optionalString(row, "effective_worktree_root")
+      ? { effectiveWorktreeRoot: optionalString(row, "effective_worktree_root") }
+      : {}),
+    ...(optionalString(row, "ownership_claim_path")
+      ? { ownershipClaimPath: optionalString(row, "ownership_claim_path") }
+      : {}),
+    ...(optionalString(row, "ownership_marker_path")
+      ? { ownershipMarkerPath: optionalString(row, "ownership_marker_path") }
+      : {}),
+    ...(optionalString(row, "ownership_marker_digest")
+      ? { ownershipMarkerDigest: optionalString(row, "ownership_marker_digest") }
+      : {}),
+    creationIntentAt: asString(row, "creation_intent_at"),
+    ...(optionalString(row, "creation_started_at")
+      ? { creationStartedAt: optionalString(row, "creation_started_at") }
+      : {}),
+    ...(optionalString(row, "ready_at") ? { readyAt: optionalString(row, "ready_at") } : {}),
+    ...(optionalString(row, "retained_at")
+      ? { retainedAt: optionalString(row, "retained_at") }
+      : {}),
+    ...(optionalString(row, "cleanup_requested_at")
+      ? { cleanupRequestedAt: optionalString(row, "cleanup_requested_at") }
+      : {}),
+    ...(optionalString(row, "cleanup_completed_at")
+      ? { cleanupCompletedAt: optionalString(row, "cleanup_completed_at") }
+      : {}),
+    ...(optionalString(row, "failure_classification")
+      ? { failureClassification: optionalString(row, "failure_classification") }
+      : {}),
+    ...(optionalString(row, "operator_attention_reason")
+      ? { operatorAttentionReason: optionalString(row, "operator_attention_reason") }
+      : {}),
+    ...(optionalString(row, "git_metadata_state")
+      ? { gitMetadataState: optionalString(row, "git_metadata_state") }
+      : {}),
+    ...(optionalString(row, "current_observed_head")
+      ? { currentObservedHead: optionalString(row, "current_observed_head") }
+      : {}),
+    ...(optionalString(row, "current_observed_branch")
+      ? { currentObservedBranch: optionalString(row, "current_observed_branch") }
+      : {}),
+    ...(row.dirty_state_json
+      ? { dirtyState: parseJson<Record<string, unknown>>(row.dirty_state_json) }
+      : {}),
+    version: asNumber(row, "version"),
+    createdAt: asString(row, "created_at"),
+    updatedAt: asString(row, "updated_at"),
   });
 
   readonly #mapEvent = (row: SqlRow): WorkflowEvent => ({

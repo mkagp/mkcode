@@ -10,6 +10,7 @@ import { createFactoryApiServer } from "./api.ts";
 import { CommandExecutionWorker } from "./commandWorker.ts";
 import type { FactoryWorkerConfig } from "./config.ts";
 import { SimulationWorker, type SimulationHandler } from "./simulationWorker.ts";
+import { WorkspaceExecutionWorker } from "./workspaceWorker.ts";
 
 const listen = (
   server: NodeHttp.Server,
@@ -95,6 +96,18 @@ export async function startFactoryWorker(
     workerInstanceId: config.workerInstanceId,
     leaseMilliseconds: config.leaseMilliseconds,
   });
+  const workspaceWorker = new WorkspaceExecutionWorker({
+    engine,
+    workerInstanceId: config.workerInstanceId,
+    factoryStateRoot: config.stateDirectory,
+    leaseMilliseconds: config.leaseMilliseconds,
+  });
+  try {
+    await workspaceWorker.reconcileAll();
+  } catch (cause) {
+    engine.close();
+    throw cause;
+  }
   const server = createFactoryApiServer({
     engine,
     credential: config.credential,
@@ -111,6 +124,7 @@ export async function startFactoryWorker(
   }
 
   let polling = false;
+  let workspaceOperationInFlight = false;
   let currentPoll: Promise<void> | undefined;
   const interval = setInterval(() => {
     if (polling) return;
@@ -119,7 +133,17 @@ export async function startFactoryWorker(
       .then(async () => {
         const claimed = engine.claimNextJob(config.workerInstanceId, config.leaseMilliseconds);
         if (!claimed) return;
-        if (claimed.job.jobType === "command.execute") {
+        if (
+          claimed.job.jobType === "workspace.allocate" ||
+          claimed.job.jobType === "workspace.cleanup"
+        ) {
+          workspaceOperationInFlight = true;
+          try {
+            await workspaceWorker.runClaimed(claimed);
+          } finally {
+            workspaceOperationInFlight = false;
+          }
+        } else if (claimed.job.jobType === "command.execute") {
           await commandWorker.runClaimed(claimed);
         } else {
           await simulationWorker.runClaimed(claimed);
@@ -150,8 +174,10 @@ export async function startFactoryWorker(
       stopped = true;
       simulationWorker.stop();
       commandWorker.stop();
+      workspaceWorker.stop();
       clearInterval(interval);
       await waitForPoll(currentPoll, config.shutdownGraceMilliseconds);
+      if (workspaceOperationInFlight && currentPoll) await currentPoll;
       try {
         await close(server);
       } finally {

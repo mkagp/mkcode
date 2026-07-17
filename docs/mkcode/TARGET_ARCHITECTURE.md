@@ -8,9 +8,10 @@ the only public control plane. The factory worker exclusively owns separate
 factory persistence and exposes a narrow authenticated loopback API and resumable
 event feed.
 
-The Phase 5 persistence/API skeleton of this target is now implemented. Runtime
-adapters, ProcessHosts, deterministic commands, workspaces, registries,
-integrations, and browser workflow views remain target components.
+The persistence/API skeleton, deterministic local command path, and Git
+worktree Workspace implementation of this target are now implemented. Agent
+runtime adapters, registries, integrations, stronger sandboxes, and browser
+workflow views remain target components.
 
 This approach reuses proven provider, event, Git, auth, and connection patterns
 without making interactive threads or a browser request process authoritative
@@ -111,8 +112,9 @@ jobs and reconciles state before accepting new work after restart.
 **Implemented now:** `apps/factory-worker` provides the separate process,
 loopback API, credential check, polling simulation loop, startup reconciliation,
 graceful shutdown, and one declared-check execution handler. Process launch is
-delegated to `packages/command-runner`; the worker still contains no worktree,
-Git, agent, provider, or integration launcher.
+delegated to `packages/command-runner`; Git effects are delegated to
+`packages/workspace-manager`. The worker still contains no coding agent,
+provider, Herdr, or integration launcher.
 
 ### Durable workflow engine
 
@@ -131,6 +133,10 @@ Migration 2 and the engine now also own durable CommandRuns, command lifecycle
 events, output artifact metadata, selected-check resolution, cancellation
 fences, and conservative local-process recovery. These additions do not give
 the engine permission to spawn a process.
+
+Migration 3 and the engine own Workspace records, allocation/cleanup job
+intents, lifecycle events, exact base-commit evidence, one-workspace-per-run
+fences, retention, and reconciliation state. The engine never invokes Git.
 
 ### Registries
 
@@ -189,6 +195,14 @@ Allocates and owns worktrees under configured roots, records ownership before
 destructive operations, reconciles interrupted allocation/cleanup, and exposes a
 future sandbox seam. Existing Git primitives are reused behind this worker-owned
 interface; interactive checkpoints remain in the interactive domain.
+
+**Implemented now:** `packages/workspace-manager` supplies the provider-neutral
+port and `GitWorktreeWorkspaceManager`. The effective v1 root is factory-owned
+state, not a browser path and not the primary checkout. Allocation creates a
+deterministic branch at the already recorded commit, verifies Git metadata and
+administrative ownership evidence, then hands the canonical worktree root to
+the command runner. Cleanup is Git-aware, non-forcing, branch-retaining, and
+refuses ambiguous ownership.
 
 ### Integration ports
 
