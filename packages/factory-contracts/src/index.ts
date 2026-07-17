@@ -26,6 +26,7 @@ export type WorkItem = typeof WorkItem.Type;
 
 export const WorkflowRunStatus = Schema.Literals([
   "queued",
+  "allocating_workspace",
   "planning",
   "implementing",
   "validating",
@@ -66,7 +67,14 @@ export const WorkflowRun = Schema.Struct({
 });
 export type WorkflowRun = typeof WorkflowRun.Type;
 
-export const StageKey = Schema.Literals(["planning", "implementing", "validating", "human_review"]);
+export const StageKey = Schema.Literals([
+  "allocating_workspace",
+  "planning",
+  "implementing",
+  "validating",
+  "human_review",
+  "workspace_cleanup",
+]);
 export type StageKey = typeof StageKey.Type;
 
 export const StageRunStatus = Schema.Literals([
@@ -131,6 +139,8 @@ export const JobType = Schema.Literals([
   "simulation.complete-stage",
   "simulation.request-human-review",
   "command.execute",
+  "workspace.allocate",
+  "workspace.cleanup",
 ]);
 export type JobType = typeof JobType.Type;
 export const SimulationJobType = Schema.Literals([
@@ -317,6 +327,61 @@ export const CommandOutputPage = Schema.Struct({
 });
 export type CommandOutputPage = typeof CommandOutputPage.Type;
 
+export const WorkspaceStatus = Schema.Literals([
+  "pending",
+  "allocating",
+  "ready",
+  "retained",
+  "cleanup_pending",
+  "removed",
+  "allocation_failed",
+  "missing",
+  "ownership_mismatch",
+  "modified",
+  "cleanup_failed",
+  "operator_attention",
+]);
+export type WorkspaceStatus = typeof WorkspaceStatus.Type;
+
+export const Workspace = Schema.Struct({
+  id: Schema.String,
+  workflowRunId: Schema.String,
+  projectId: Schema.String,
+  type: Schema.Literal("git_worktree"),
+  status: WorkspaceStatus,
+  sourceRepositoryPath: Schema.String,
+  canonicalSourceRepositoryPath: Schema.optional(Schema.String),
+  gitCommonDirectory: Schema.optional(Schema.String),
+  requestedBaseBranch: Schema.String,
+  resolvedBaseReference: Schema.optional(Schema.String),
+  resolvedBaseCommit: Schema.optional(Schema.String),
+  baseResolvedAt: Schema.optional(Schema.String),
+  generatedBranchName: Schema.optional(Schema.String),
+  worktreePath: Schema.optional(Schema.String),
+  canonicalWorktreePath: Schema.optional(Schema.String),
+  configuredWorktreeRoot: Schema.String,
+  effectiveWorktreeRoot: Schema.optional(Schema.String),
+  ownershipClaimPath: Schema.optional(Schema.String),
+  ownershipMarkerPath: Schema.optional(Schema.String),
+  ownershipMarkerDigest: Schema.optional(Schema.String),
+  creationIntentAt: Schema.String,
+  creationStartedAt: Schema.optional(Schema.String),
+  readyAt: Schema.optional(Schema.String),
+  retainedAt: Schema.optional(Schema.String),
+  cleanupRequestedAt: Schema.optional(Schema.String),
+  cleanupCompletedAt: Schema.optional(Schema.String),
+  failureClassification: Schema.optional(Schema.String),
+  operatorAttentionReason: Schema.optional(Schema.String),
+  gitMetadataState: Schema.optional(Schema.String),
+  currentObservedHead: Schema.optional(Schema.String),
+  currentObservedBranch: Schema.optional(Schema.String),
+  dirtyState: Schema.optional(Schema.Record(Schema.String, Schema.Unknown)),
+  version: PositiveInt,
+  createdAt: Schema.String,
+  updatedAt: Schema.String,
+});
+export type Workspace = typeof Workspace.Type;
+
 export const WorkflowEvent = Schema.Struct({
   cursor: PositiveInt,
   id: Schema.String,
@@ -363,6 +428,7 @@ export const WorkflowDetail = Schema.Struct({
   approvals: Schema.Array(Approval),
   artifacts: Schema.Array(Artifact),
   commands: Schema.Array(CommandRun),
+  workspaces: Schema.Array(Workspace),
 });
 export type WorkflowDetail = typeof WorkflowDetail.Type;
 
@@ -377,6 +443,12 @@ export const WorkflowCancelRequest = Schema.Struct({
   requestedBy: Schema.String,
 });
 export type WorkflowCancelRequest = typeof WorkflowCancelRequest.Type;
+
+export const WorkspaceActionRequest = Schema.Struct({
+  idempotencyKey: TrimmedNonEmptyString,
+  requestedBy: TrimmedNonEmptyString,
+});
+export type WorkspaceActionRequest = typeof WorkspaceActionRequest.Type;
 
 export const ApprovalResolveRequest = Schema.Struct({
   decision: Schema.Literals(["approved", "rejected"]),
