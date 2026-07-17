@@ -185,6 +185,40 @@ describe("GitWorktreeWorkspaceManager", () => {
     NodeAssert.equal((await git(fixture.repository, "status", "--porcelain")).stdout, "");
   });
 
+  it("publishes ownership evidence atomically after an interrupted marker finalization", async () => {
+    const fixture = await makeRepository();
+    let interruptFinalization = true;
+    const manager = new GitWorktreeWorkspaceManager({
+      beforeOwnershipMarkerPublished: () => {
+        if (interruptFinalization) throw new Error("injected failure before marker publish");
+      },
+    });
+    const value = await plan(manager, fixture);
+
+    await NodeAssert.rejects(
+      () => manager.allocate(value),
+      (cause) => cause instanceof WorkspaceManagerError && cause.code === "ownership_ambiguous",
+    );
+    const gitDirectory = (
+      await git(value.worktreePath, "rev-parse", "--absolute-git-dir")
+    ).stdout.trim();
+    const markerPath = NodePath.join(gitDirectory, "mkcode-workspace.json");
+    await NodeAssert.rejects(() => NodeFSP.lstat(markerPath));
+    NodeAssert.equal(
+      (await NodeFSP.readdir(gitDirectory)).some((name) =>
+        name.startsWith(".mkcode-workspace.json."),
+      ),
+      false,
+    );
+    NodeAssert.equal(permissionBits((await NodeFSP.stat(value.ownershipClaimPath)).mode), 0o600);
+
+    interruptFinalization = false;
+    const allocated = await manager.allocate(value);
+    NodeAssert.equal(allocated.ownershipMarkerPath, markerPath);
+    NodeAssert.equal(permissionBits((await NodeFSP.stat(markerPath)).mode), 0o600);
+    await NodeAssert.rejects(() => NodeFSP.lstat(value.ownershipClaimPath));
+  });
+
   it("discards only a matching pre-allocation claim when no Git side effect exists", async () => {
     const fixture = await makeRepository();
     const manager = new GitWorktreeWorkspaceManager();

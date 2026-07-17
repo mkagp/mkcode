@@ -164,6 +164,7 @@ export interface WorkspaceManager {
 
 interface WorkspaceManagerHooks {
   readonly afterWorktreeAdded?: () => void | Promise<void>;
+  readonly beforeOwnershipMarkerPublished?: () => void | Promise<void>;
 }
 
 interface GitResult {
@@ -310,9 +311,17 @@ const digestMarker = (marker: WorkspaceOwnershipMarker): string =>
 
 const markerJson = (marker: WorkspaceOwnershipMarker): string => `${JSON.stringify(marker)}\n`;
 
-const writeMarker = async (path: string, marker: WorkspaceOwnershipMarker): Promise<void> => {
+const writeMarker = async (
+  path: string,
+  marker: WorkspaceOwnershipMarker,
+  beforePublish?: () => void | Promise<void>,
+): Promise<void> => {
+  const temporaryPath = NodePath.join(
+    NodePath.dirname(path),
+    `.${NodePath.basename(path)}.${NodeCrypto.randomUUID()}.tmp`,
+  );
   const handle = await NodeFSP.open(
-    path,
+    temporaryPath,
     NodeFS.constants.O_CREAT |
       NodeFS.constants.O_EXCL |
       NodeFS.constants.O_WRONLY |
@@ -325,6 +334,19 @@ const writeMarker = async (path: string, marker: WorkspaceOwnershipMarker): Prom
     await handle.sync();
   } finally {
     await handle.close();
+  }
+  try {
+    await beforePublish?.();
+    // A hard-link publish is atomic and, unlike rename, cannot replace existing evidence.
+    await NodeFSP.link(temporaryPath, path);
+    const directory = await NodeFSP.open(NodePath.dirname(path), "r");
+    try {
+      await directory.sync();
+    } finally {
+      await directory.close();
+    }
+  } finally {
+    await NodeFSP.rm(temporaryPath, { force: true });
   }
 };
 
@@ -738,7 +760,7 @@ export class GitWorktreeWorkspaceManager implements WorkspaceManager {
       );
       const markerPath = NodePath.join(gitDirectory, MARKER_FILE_NAME);
       try {
-        await writeMarker(markerPath, claim.marker);
+        await writeMarker(markerPath, claim.marker, this.#hooks.beforeOwnershipMarkerPublished);
       } catch (cause) {
         throw new WorkspaceManagerError(
           "ownership_ambiguous",
