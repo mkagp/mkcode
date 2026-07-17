@@ -339,11 +339,13 @@ const writeMarker = async (
     await beforePublish?.();
     // A hard-link publish is atomic and, unlike rename, cannot replace existing evidence.
     await NodeFSP.link(temporaryPath, path);
-    const directory = await NodeFSP.open(NodePath.dirname(path), "r");
-    try {
-      await directory.sync();
-    } finally {
-      await directory.close();
+    if (NodeProcess.platform !== "win32") {
+      const directory = await NodeFSP.open(NodePath.dirname(path), "r");
+      try {
+        await directory.sync();
+      } finally {
+        await directory.close();
+      }
     }
   } finally {
     await NodeFSP.rm(temporaryPath, { force: true });
