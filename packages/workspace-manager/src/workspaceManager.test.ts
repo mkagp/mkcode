@@ -341,6 +341,38 @@ describe("GitWorktreeWorkspaceManager", () => {
     await NodeAssert.rejects(() => NodeFSP.lstat(value.worktreePath));
   });
 
+  it("rejects execution-capable filters before inspecting worktree status", async () => {
+    const fixture = await makeRepository();
+    const manager = new GitWorktreeWorkspaceManager();
+    await NodeFSP.writeFile(
+      NodePath.join(fixture.repository, ".gitattributes"),
+      "*.txt filter=probe\n",
+    );
+    await NodeFSP.writeFile(NodePath.join(fixture.repository, "payload.txt"), "payload\n");
+    await git(fixture.repository, "add", ".gitattributes", "payload.txt");
+    await git(
+      fixture.repository,
+      "-c",
+      "user.name=MK Code Test",
+      "-c",
+      "user.email=mkcode@example.invalid",
+      "commit",
+      "-m",
+      "add inspection filter fixture",
+    );
+    const value = await plan(manager, fixture);
+    const allocated = await manager.allocate(value);
+    const sentinel = NodePath.join(fixture.root, "inspection-filter-executed");
+    await git(fixture.repository, "config", "filter.probe.clean", `touch '${sentinel}'; cat`);
+
+    await NodeAssert.rejects(
+      () => manager.inspect(inspectionInput(value, allocated)),
+      (cause) =>
+        cause instanceof WorkspaceManagerError && cause.code === "repository_unsafe_config",
+    );
+    await NodeAssert.rejects(() => NodeFSP.lstat(sentinel));
+  });
+
   it("does not discard a claim when branch absence cannot be verified", async () => {
     const fixture = await makeRepository();
     const manager = new GitWorktreeWorkspaceManager();

@@ -884,6 +884,7 @@ export class GitWorktreeWorkspaceManager implements WorkspaceManager {
         .trim()
         .toLowerCase();
       branch = await currentBranch(canonicalPath);
+      await assertSafeRepositoryConfig(canonicalPath);
       dirty =
         (await runGit(["-C", canonicalPath, "status", "--porcelain=v1", "--untracked-files=all"]))
           .stdout.length > 0;
@@ -892,7 +893,10 @@ export class GitWorktreeWorkspaceManager implements WorkspaceManager {
         (await runGit(["-C", canonicalPath, "rev-parse", "--git-dir"])).stdout.trim(),
       );
       markerPath = NodePath.join(gitDirectory, MARKER_FILE_NAME);
-    } catch {
+    } catch (cause) {
+      if (cause instanceof WorkspaceManagerError && cause.code === "repository_unsafe_config") {
+        throw cause;
+      }
       return {
         state: "path_collision",
         canonicalPath: expectedPath,
