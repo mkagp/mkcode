@@ -309,6 +309,74 @@ describe("GitWorktreeWorkspaceManager", () => {
     );
   });
 
+  it("rechecks repository-local filters immediately before worktree creation", async () => {
+    const fixture = await makeRepository();
+    const manager = new GitWorktreeWorkspaceManager();
+    await NodeFSP.writeFile(
+      NodePath.join(fixture.repository, ".gitattributes"),
+      "*.txt filter=probe\n",
+    );
+    await NodeFSP.writeFile(NodePath.join(fixture.repository, "payload.txt"), "payload\n");
+    await git(fixture.repository, "add", ".gitattributes", "payload.txt");
+    await git(
+      fixture.repository,
+      "-c",
+      "user.name=MK Code Test",
+      "-c",
+      "user.email=mkcode@example.invalid",
+      "commit",
+      "-m",
+      "add filter fixture",
+    );
+    const value = await plan(manager, fixture);
+    const sentinel = NodePath.join(fixture.root, "filter-executed");
+    await git(fixture.repository, "config", "filter.probe.smudge", `touch '${sentinel}'; cat`);
+
+    await NodeAssert.rejects(
+      () => manager.allocate(value),
+      (cause) =>
+        cause instanceof WorkspaceManagerError && cause.code === "repository_unsafe_config",
+    );
+    await NodeAssert.rejects(() => NodeFSP.lstat(sentinel));
+    await NodeAssert.rejects(() => NodeFSP.lstat(value.worktreePath));
+  });
+
+  it("does not discard a claim when branch absence cannot be verified", async () => {
+    const fixture = await makeRepository();
+    const manager = new GitWorktreeWorkspaceManager();
+    const value = await plan(manager, fixture);
+    const input = {
+      workspaceId: value.workspaceId,
+      workflowRunId: value.workflowRunId,
+      projectId: value.projectId,
+      canonicalSourceRepositoryPath: value.canonicalSourceRepositoryPath,
+      gitCommonDirectory: value.gitCommonDirectory,
+      canonicalWorktreePath: value.worktreePath,
+      branchName: value.branchName,
+      resolvedBaseCommit: value.resolvedBaseCommit,
+      ownershipClaimPath: value.ownershipClaimPath,
+      ownershipMarkerDigest: value.markerDigest,
+    };
+    await NodeFSP.mkdir(NodePath.dirname(value.ownershipClaimPath), {
+      recursive: true,
+      mode: 0o700,
+    });
+    await NodeFSP.writeFile(value.ownershipClaimPath, `${JSON.stringify(value.marker)}\n`, {
+      mode: 0o600,
+    });
+    const packedRefs = NodePath.join(value.gitCommonDirectory, "packed-refs");
+    await NodeFSP.writeFile(packedRefs, "not a packed ref\n");
+    try {
+      await NodeAssert.rejects(
+        () => manager.inspect(input),
+        (cause) => cause instanceof WorkspaceManagerError && cause.code === "git_failed",
+      );
+      NodeAssert.equal((await NodeFSP.lstat(value.ownershipClaimPath)).isFile(), true);
+    } finally {
+      await NodeFSP.rm(packedRefs, { force: true });
+    }
+  });
+
   it("rejects path and branch collisions without force-resetting either", async () => {
     const fixture = await makeRepository();
     const manager = new GitWorktreeWorkspaceManager();

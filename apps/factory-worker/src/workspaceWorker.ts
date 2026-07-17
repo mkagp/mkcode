@@ -172,6 +172,18 @@ export class WorkspaceExecutionWorker {
             this.#engine.recordWorkspaceInspection(workspace.id, inspectionEvidence(inspection));
             continue;
           }
+          if (inspection.observedHead !== workspace.resolvedBaseCommit) {
+            this.#engine.recordWorkspaceInspection(workspace.id, {
+              matching: false,
+              state: "ownership_mismatch",
+              reason: "Allocating workspace HEAD no longer matches its resolved base commit.",
+              gitMetadataState: "head_mismatch",
+              currentObservedHead: inspection.observedHead,
+              currentObservedBranch: inspection.observedBranch,
+              ...(inspection.dirty === undefined ? {} : { dirty: inspection.dirty }),
+            });
+            continue;
+          }
           this.#engine.recoverWorkspaceAllocation(workspace.id, {
             canonicalWorktreePath: inspection.canonicalPath,
             ownershipMarkerPath: inspection.ownershipMarkerPath ?? input.ownershipMarkerPath ?? "",

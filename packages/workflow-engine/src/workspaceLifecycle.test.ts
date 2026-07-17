@@ -6,6 +6,7 @@ import * as NodePath from "node:path";
 
 import { afterEach, describe, it } from "@effect/vitest";
 
+import { WorkflowEngineError } from "./errors.ts";
 import { makeCreateRequest, makeProjectSnapshot } from "./testFixtures.ts";
 import { WorkflowEngine } from "./workflowEngine.ts";
 
@@ -130,7 +131,8 @@ describe("durable workspace lifecycle", () => {
 
   it("schedules one cleanup on cancellation and leaves the terminal workflow unchanged", async () => {
     const root = await makeRoot();
-    const engine = await WorkflowEngine.open({ stateDirectory: NodePath.join(root, "state") });
+    const stateDirectory = NodePath.join(root, "state");
+    let engine = await WorkflowEngine.open({ stateDirectory });
     const { created, workspace } = allocate(engine, root);
     engine.cancelWorkflow(created.workflowRun.id, { requestedBy: "operator" });
     engine.cancelWorkflow(created.workflowRun.id, { requestedBy: "operator" });
@@ -141,6 +143,10 @@ describe("durable workspace lifecycle", () => {
         .jobs.filter((job) => job.jobType === "workspace.cleanup").length,
       1,
     );
+    engine.close();
+    engine = await WorkflowEngine.open({ stateDirectory });
+    engine.reconcile();
+    NodeAssert.equal(engine.readWorkspace(workspace.id).status, "cleanup_pending");
     const claimed = engine.claimNextJob("workspace-worker");
     NodeAssert.ok(claimed);
     NodeAssert.equal(claimed.job.jobType, "workspace.cleanup");
@@ -223,10 +229,19 @@ describe("durable workspace lifecycle", () => {
     });
     engine.cancelWorkflow(created.workflowRun.id, { requestedBy: "operator" });
 
-    NodeAssert.throws(() =>
-      engine.recoverWorkspaceAllocation(workspace.id, readyEvidence(root, created.workflowRun.id)),
+    NodeAssert.throws(
+      () =>
+        engine.recoverWorkspaceAllocation(
+          workspace.id,
+          readyEvidence(root, created.workflowRun.id),
+        ),
+      (cause) =>
+        cause instanceof WorkflowEngineError &&
+        cause.code === "invalid_transition" &&
+        cause.message.includes("inactive workflow"),
     );
     const detail = engine.readWorkflow(created.workflowRun.id);
+    NodeAssert.equal(detail.workspaces[0]?.status, "allocating");
     NodeAssert.equal(detail.workflowRun.status, "cancelled");
     NodeAssert.equal(detail.jobs[0]?.status, "cancelled");
     NodeAssert.equal(detail.stages[0]?.status, "cancelled");

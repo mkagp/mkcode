@@ -24,6 +24,20 @@ import { startFactoryWorker, type RunningFactoryWorker } from "./runtime.ts";
 
 const credential = "factory-test-credential-0123456789abcdef";
 const execFile = NodeUtil.promisify(NodeChildProcess.execFile);
+const fixtureGitEnvironment: NodeJS.ProcessEnv = {
+  ...process.env,
+  GIT_CONFIG_NOSYSTEM: "1",
+  GIT_CONFIG_GLOBAL: "/dev/null",
+  GIT_CONFIG_COUNT: "3",
+  GIT_CONFIG_KEY_0: "core.hooksPath",
+  GIT_CONFIG_VALUE_0: "/dev/null",
+  GIT_CONFIG_KEY_1: "commit.gpgSign",
+  GIT_CONFIG_VALUE_1: "false",
+  GIT_CONFIG_KEY_2: "tag.gpgSign",
+  GIT_CONFIG_VALUE_2: "false",
+};
+const fixtureGit = (args: ReadonlyArray<string>) =>
+  execFile("git", [...args], { encoding: "utf8", env: fixtureGitEnvironment });
 
 const makeRoot = async () =>
   NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "mkcode-factory-worker-"));
@@ -33,10 +47,10 @@ const makeGitFixture = async () => {
   const repository = NodePath.join(root, "primary");
   const stateDirectory = NodePath.join(root, "factory-state");
   await NodeFSP.mkdir(repository);
-  await execFile("git", ["init", "-b", "main", repository]);
+  await fixtureGit(["init", "-b", "main", repository]);
   await NodeFSP.writeFile(NodePath.join(repository, "README.md"), "factory fixture\n");
-  await execFile("git", ["-C", repository, "add", "README.md"]);
-  await execFile("git", [
+  await fixtureGit(["-C", repository, "add", "README.md"]);
+  await fixtureGit([
     "-C",
     repository,
     "-c",
@@ -47,9 +61,7 @@ const makeGitFixture = async () => {
     "-m",
     "fixture",
   ]);
-  const primaryHead = (
-    await execFile("git", ["-C", repository, "rev-parse", "HEAD"])
-  ).stdout.trim();
+  const primaryHead = (await fixtureGit(["-C", repository, "rev-parse", "HEAD"])).stdout.trim();
   return { root, repository, stateDirectory, primaryHead };
 };
 
@@ -904,6 +916,101 @@ describe("factory worker API", () => {
           .filter((line) => line.startsWith("worktree ")).length,
         1,
       );
+      const branchRefs = (
+        await fixtureGit(["-C", repository, "for-each-ref", "--format=%(refname)", "refs/heads"])
+      ).stdout.split("\n");
+      NodeAssert.equal(branchRefs.includes(`refs/heads/${plan.branchName}`), false);
+    } finally {
+      await worker.stop();
+      await NodeFSP.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("does not recover an allocating worktree whose HEAD moved after Git creation", async () => {
+    const fixture = await makeGitFixture();
+    const { root, repository, stateDirectory } = fixture;
+    const config = resolveFactoryWorkerConfig({
+      host: "127.0.0.1",
+      port: 0,
+      stateDirectory,
+      credential,
+      workerInstanceId: "head-mismatch-worker",
+      pollIntervalMilliseconds: 60_000,
+      leaseMilliseconds: 10_000,
+    });
+    let worker = await startFactoryWorker(config);
+    try {
+      const created = await api<WorkflowCreateResult>(worker, "/v1/workflows", {
+        method: "POST",
+        body: makeCommandRequest(repository, "head-mismatch-restart", ["-e", "process.exit(0)"]),
+      });
+      const detail = worker.engine.readWorkflow(created.body.workflowRun.id);
+      const workspace = detail.workspaces[0];
+      const claimed = worker.engine.claimNextJob("head-mismatch-worker", 10_000);
+      NodeAssert.ok(workspace);
+      NodeAssert.ok(claimed);
+      const manager = new GitWorktreeWorkspaceManager();
+      const plan = await manager.plan({
+        workspaceId: workspace.id,
+        workflowRunId: workspace.workflowRunId,
+        projectId: workspace.projectId,
+        sourceRepositoryPath: workspace.sourceRepositoryPath,
+        requestedBaseBranch: workspace.requestedBaseBranch,
+        configuredWorktreeRoot: workspace.configuredWorktreeRoot,
+        factoryStateRoot: stateDirectory,
+        createdAt: workspace.createdAt,
+        ownershipNonce: "head-mismatch-nonce",
+      });
+      worker.engine.beginWorkspaceAllocation({
+        workspaceId: workspace.id,
+        jobId: claimed.job.id,
+        leaseOwner: "head-mismatch-worker",
+        expectedStageVersion: claimed.stageVersion,
+        evidence: {
+          canonicalSourceRepositoryPath: plan.canonicalSourceRepositoryPath,
+          gitCommonDirectory: plan.gitCommonDirectory,
+          ...(plan.resolvedBaseReference
+            ? { resolvedBaseReference: plan.resolvedBaseReference }
+            : {}),
+          resolvedBaseCommit: plan.resolvedBaseCommit,
+          baseResolvedAt: plan.baseResolvedAt,
+          generatedBranchName: plan.branchName,
+          worktreePath: plan.worktreePath,
+          effectiveWorktreeRoot: plan.effectiveWorktreeRoot,
+          ownershipClaimPath: plan.ownershipClaimPath,
+          ownershipMarkerDigest: plan.markerDigest,
+        },
+      });
+      const allocated = await manager.allocate(plan);
+      await NodeFSP.writeFile(
+        NodePath.join(allocated.canonicalWorktreePath, "changed-after-allocation.txt"),
+        "changed\n",
+      );
+      await fixtureGit([
+        "-C",
+        allocated.canonicalWorktreePath,
+        "add",
+        "changed-after-allocation.txt",
+      ]);
+      await fixtureGit([
+        "-C",
+        allocated.canonicalWorktreePath,
+        "-c",
+        "user.name=MK Code Test",
+        "-c",
+        "user.email=mkcode@example.invalid",
+        "commit",
+        "-m",
+        "move factory head",
+      ]);
+
+      await worker.stop();
+      worker = await startFactoryWorker({ ...config, workerInstanceId: "head-reconciler" });
+      const recovered = worker.engine.readWorkflow(created.body.workflowRun.id);
+      NodeAssert.equal(recovered.workflowRun.status, "operator_attention");
+      NodeAssert.equal(recovered.workspaces[0]?.status, "ownership_mismatch");
+      NodeAssert.equal(recovered.workspaces[0]?.gitMetadataState, "head_mismatch");
+      NodeAssert.equal(recovered.commands.length, 0);
     } finally {
       await worker.stop();
       await NodeFSP.rm(root, { recursive: true, force: true });

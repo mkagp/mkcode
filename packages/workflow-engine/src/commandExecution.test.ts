@@ -401,6 +401,39 @@ describe("durable command execution", () => {
     NodeAssert.equal(detail.workflowRun.status, "failed");
     NodeAssert.equal(detail.commands[0]?.status, "spawn_failed");
     NodeAssert.equal(detail.commands[0]?.failureClassification, "invalid_command_snapshot");
+    NodeAssert.equal(detail.workspaces[0]?.status, "retained");
+    engine.close();
+  });
+
+  it("retains the workspace when process launch fails after command scheduling", async () => {
+    const root = await makeRoot();
+    const engine = await WorkflowEngine.open({ stateDirectory: NodePath.join(root, "state") });
+    const created = createCommandWorkflow(engine, root);
+    const claimed = claimValidation(engine);
+    const pending = engine.readWorkflow(created.workflowRun.id).commands[0];
+    NodeAssert.ok(pending);
+    const starting = engine.startCommand({
+      commandRunId: pending.id,
+      jobId: claimed.job.id,
+      leaseOwner: "worker-a",
+      attemptId: claimed.attempt.id,
+      expectedStageVersion: claimed.stageVersion,
+      processHostExecutionId: "execution-1",
+      processHostType: "local",
+      stdoutArtifactReference: "command-output/execution-1/stdout.log",
+      stderrArtifactReference: "command-output/execution-1/stderr.log",
+    });
+    const detail = engine.failCommandBeforeLaunch({
+      commandRunId: pending.id,
+      jobId: claimed.job.id,
+      leaseOwner: "worker-a",
+      expectedCommandVersion: starting.version,
+      expectedStageVersion: claimed.stageVersion,
+      failureClassification: "spawn_failed",
+    });
+    NodeAssert.equal(detail.workflowRun.status, "failed");
+    NodeAssert.equal(detail.commands[0]?.status, "spawn_failed");
+    NodeAssert.equal(detail.workspaces[0]?.status, "retained");
     engine.close();
   });
 

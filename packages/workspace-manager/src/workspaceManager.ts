@@ -363,6 +363,43 @@ const currentBranch = async (worktree: string): Promise<string | undefined> => {
   }
 };
 
+const localBranchExists = async (source: string, branchName: string): Promise<boolean> => {
+  const reference = `refs/heads/${branchName}`;
+  const result = await runGit(["-C", source, "for-each-ref", "--format=%(refname)", reference]);
+  return result.stdout.split("\n").some((line) => line.trim() === reference);
+};
+
+const assertSafeRepositoryConfig = async (source: string): Promise<void> => {
+  try {
+    const unsafeConfig = await runGit([
+      "-C",
+      source,
+      "config",
+      "--local",
+      "--includes",
+      "--get-regexp",
+      "^(core\\.fsmonitor|filter\\..*\\.(clean|smudge|process|required))$",
+    ]);
+    if (unsafeConfig.stdout.trim().length > 0) {
+      throw new WorkspaceManagerError(
+        "repository_unsafe_config",
+        "Repository-local Git configuration contains execution-capable helpers.",
+      );
+    }
+  } catch (cause) {
+    if (cause instanceof WorkspaceManagerError && cause.code === "repository_unsafe_config") {
+      throw cause;
+    }
+    if (
+      !(cause instanceof WorkspaceManagerError) ||
+      cause.code !== "git_failed" ||
+      cause.details?.exitCode !== 1
+    ) {
+      throw cause;
+    }
+  }
+};
+
 const worktreeMetadata = async (
   sourceRepository: string,
   expectedPath: string,
@@ -461,34 +498,7 @@ export class GitWorktreeWorkspaceManager implements WorkspaceManager {
         "Registered path must be the primary Git checkout root.",
       );
     }
-    try {
-      const unsafeConfig = await runGit([
-        "-C",
-        source,
-        "config",
-        "--local",
-        "--includes",
-        "--get-regexp",
-        "^(core\\.fsmonitor|filter\\..*\\.(clean|smudge|process|required))$",
-      ]);
-      if (unsafeConfig.stdout.trim().length > 0) {
-        throw new WorkspaceManagerError(
-          "repository_unsafe_config",
-          "Repository-local Git configuration contains execution-capable helpers.",
-        );
-      }
-    } catch (cause) {
-      if (cause instanceof WorkspaceManagerError && cause.code === "repository_unsafe_config") {
-        throw cause;
-      }
-      if (
-        !(cause instanceof WorkspaceManagerError) ||
-        cause.code !== "git_failed" ||
-        cause.details?.exitCode !== 1
-      ) {
-        throw cause;
-      }
-    }
+    await assertSafeRepositoryConfig(source);
     for (const operationPath of [
       "MERGE_HEAD",
       "CHERRY_PICK_HEAD",
@@ -650,21 +660,11 @@ export class GitWorktreeWorkspaceManager implements WorkspaceManager {
       );
     }
 
-    try {
-      await runGit([
-        "-C",
-        plan.canonicalSourceRepositoryPath,
-        "show-ref",
-        "--verify",
-        `refs/heads/${plan.branchName}`,
-      ]);
+    if (await localBranchExists(plan.canonicalSourceRepositoryPath, plan.branchName)) {
       throw new WorkspaceManagerError(
         "branch_collision",
         "Factory branch already exists without proven ownership.",
       );
-    } catch (cause) {
-      if (cause instanceof WorkspaceManagerError && cause.code === "branch_collision") throw cause;
-      if (!(cause instanceof WorkspaceManagerError) || cause.code !== "git_failed") throw cause;
     }
 
     const existingClaim = await readMarker(plan.ownershipClaimPath);
@@ -683,6 +683,7 @@ export class GitWorktreeWorkspaceManager implements WorkspaceManager {
     }
 
     try {
+      await assertSafeRepositoryConfig(plan.canonicalSourceRepositoryPath);
       await runGit(
         [
           "-C",
@@ -816,19 +817,7 @@ export class GitWorktreeWorkspaceManager implements WorkspaceManager {
         reason: "The registered source repository Git metadata is unavailable.",
       };
     }
-    let branchPresent = false;
-    try {
-      await runGit([
-        "-C",
-        canonicalSource,
-        "show-ref",
-        "--verify",
-        `refs/heads/${input.branchName}`,
-      ]);
-      branchPresent = true;
-    } catch (cause) {
-      if (!(cause instanceof WorkspaceManagerError) || cause.code !== "git_failed") throw cause;
-    }
+    const branchPresent = await localBranchExists(canonicalSource, input.branchName);
     if (!(await exists(expectedPath))) {
       const claimPresent = input.ownershipClaimPath
         ? await exists(input.ownershipClaimPath)

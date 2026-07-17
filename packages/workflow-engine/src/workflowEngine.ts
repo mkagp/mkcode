@@ -2147,6 +2147,7 @@ export class WorkflowEngine {
         commandRunId: command.id,
         outcome: "spawn_failed",
       });
+      this.#retainWorkspaceInTransaction(command.workflowRunId, now);
       return this.readWorkflow(command.workflowRunId);
     });
   }
@@ -2396,6 +2397,7 @@ export class WorkflowEngine {
           failureSummary: input.failureSummary,
           classification: input.retryable ? "maximum_attempts_exhausted" : "terminal",
         });
+        this.#retainWorkspaceInTransaction(job.workflowRunId, now);
       }
       return this.#findJob(job.id);
     });
@@ -2667,6 +2669,7 @@ export class WorkflowEngine {
           `SELECT job_intents.id, job_intents.workflow_run_id
            FROM job_intents JOIN workflow_runs ON workflow_runs.id = job_intents.workflow_run_id
            WHERE workflow_runs.cancellation_requested_at IS NOT NULL
+             AND job_intents.job_type <> 'workspace.cleanup'
              AND job_intents.status IN ('pending','claimed')`,
         )
         .all() as ReadonlyArray<SqlRow>;
@@ -3160,7 +3163,7 @@ export class WorkflowEngine {
     const existing = this.#database
       .prepare(
         `SELECT id FROM job_intents WHERE workflow_run_id = ?
-         AND job_type = 'workspace.cleanup' LIMIT 1`,
+         AND job_type = 'workspace.cleanup' AND status IN ('pending','claimed') LIMIT 1`,
       )
       .get(runId);
     if (existing) return;
