@@ -102,6 +102,22 @@ ProcessHost output is observational. It can prove that a process exited with a
 code; it cannot decide that an agent satisfied a workflow stage. Deterministic
 CommandRuns and controller policy make that decision.
 
+## Workspace boundary
+
+`WorkspaceManager` is separate from `ProcessHost`: it allocates and verifies the
+filesystem execution root, while `ProcessHost` starts and controls a process in
+that supplied root. `packages/workspace-manager` currently implements local Git
+worktrees; `packages/command-runner` receives only the canonical execution root
+and cannot allocate or remove it. Future container, VM, remote-host, or
+Herdr-backed options must preserve this separation and the durable Workspace
+identity.
+
+The local worktree implementation snapshots the base commit before Git side
+effects and reconciles path, common repository, branch, HEAD, worktree metadata,
+and administrative ownership evidence after restart. Missing or ambiguous
+evidence becomes operator attention rather than silent recreation. This is
+durable orchestration evidence, not process or filesystem sandboxing.
+
 ## Herdr relationship
 
 Herdr may provide persistent PTYs, terminal panes, raw output, remote attachment,

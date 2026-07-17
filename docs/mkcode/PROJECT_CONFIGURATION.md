@@ -13,7 +13,7 @@ and its WebSocket handlers live in `apps/server/src/projectRegistry.ts` and
 `packages/project-config` or the registry service starts processes, executes a
 command, creates a worktree, launches an agent, or advances a workflow. The
 separate factory worker now consumes an immutable snapshot to execute one
-selected validation check.
+selected validation check inside a separately allocated factory worktree.
 
 ## Configuration hierarchy
 
@@ -100,27 +100,27 @@ requested TypeScript example.
 
 ### Field rules and defaults
 
-| Field                      | Rule or default                                                                                                                                |
-| -------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| `version`                  | Required; exactly integer-compatible value `1`. Other values fail as `unsupported_version`.                                                    |
-| `project.id`               | Required stable lowercase kebab-case ID, at most 64 characters. It cannot change during revalidation.                                          |
-| `project.name`             | Required non-empty display name.                                                                                                               |
-| `project.description`      | Optional text.                                                                                                                                 |
-| `repository.baseBranch`    | Required Git-valid branch reference; invalid separators, `..`, `@{`, `.lock` components, and other Git-invalid forms are rejected.             |
-| `repository.worktreeRoot`  | Optional repository-relative path; defaults to `.mkcode/worktrees`. This phase resolves but never creates it.                                  |
-| `repository.contextFiles`  | Optional ordered repository-relative file references; each must exist and remain inside the repository after symlink resolution.               |
-| `setup`                    | Optional ordered command array; defaults to `[]`.                                                                                              |
-| `checks`                   | Optional ordered validation array; defaults to `[]`.                                                                                           |
-| command/check `id`         | Required non-empty ID. IDs are unique across both setup and checks.                                                                            |
-| `executable`               | Required non-empty string without NUL. It is data only; no shell parsing or execution occurs.                                                  |
-| `args`                     | Required array of strings. A scalar command string is rejected.                                                                                |
-| `workingDirectory`         | Optional repository-relative existing directory; defaults to `.`.                                                                              |
-| `timeoutSeconds`           | Optional safe integer from 1 through 86,400; defaults to 300.                                                                                  |
-| `environment`              | Optional array of `{name, source}` environment-variable-name references. Values are neither accepted nor resolved.                             |
-| `artifacts`                | Optional array of repository-relative `{path, optional}` declarations; `optional` defaults to false. Outputs need not exist during validation. |
-| `failureBehavior`          | Checks only; `fail` or `continue`, default `fail`. The runner semantics are deferred.                                                          |
-| `workflows.allowed`        | Optional ordered, unique opaque identifiers; defaults to `[]`.                                                                                 |
-| `execution.defaultProfile` | Required opaque identifier. Its existence is not checked until an execution-profile registry exists.                                           |
+| Field                      | Rule or default                                                                                                                                         |
+| -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `version`                  | Required; exactly integer-compatible value `1`. Other values fail as `unsupported_version`.                                                             |
+| `project.id`               | Required stable lowercase kebab-case ID, at most 64 characters. It cannot change during revalidation.                                                   |
+| `project.name`             | Required non-empty display name.                                                                                                                        |
+| `project.description`      | Optional text.                                                                                                                                          |
+| `repository.baseBranch`    | Required Git-valid branch reference; invalid separators, `..`, `@{`, `.lock` components, and other Git-invalid forms are rejected.                      |
+| `repository.worktreeRoot`  | Optional repository-relative compatibility value; defaults to `.mkcode/worktrees`. The factory records it but v1 allocation uses private factory state. |
+| `repository.contextFiles`  | Optional ordered repository-relative file references; each must exist and remain inside the repository after symlink resolution.                        |
+| `setup`                    | Optional ordered command array; defaults to `[]`.                                                                                                       |
+| `checks`                   | Optional ordered validation array; defaults to `[]`.                                                                                                    |
+| command/check `id`         | Required non-empty ID. IDs are unique across both setup and checks.                                                                                     |
+| `executable`               | Required non-empty string without NUL. It is data only; no shell parsing or execution occurs.                                                           |
+| `args`                     | Required array of strings. A scalar command string is rejected.                                                                                         |
+| `workingDirectory`         | Optional repository-relative existing directory; defaults to `.`.                                                                                       |
+| `timeoutSeconds`           | Optional safe integer from 1 through 86,400; defaults to 300.                                                                                           |
+| `environment`              | Optional array of `{name, source}` environment-variable-name references. Values are neither accepted nor resolved.                                      |
+| `artifacts`                | Optional array of repository-relative `{path, optional}` declarations; `optional` defaults to false. Outputs need not exist during validation.          |
+| `failureBehavior`          | Checks only; `fail` or `continue`, default `fail`. The runner semantics are deferred.                                                                   |
+| `workflows.allowed`        | Optional ordered, unique opaque identifiers; defaults to `[]`.                                                                                          |
+| `execution.defaultProfile` | Required opaque identifier. Its existence is not checked until an execution-profile registry exists.                                                    |
 
 Unknown keys fail with `unknown_key`; they are never silently discarded. YAML
 aliases are not expanded. Duplicate YAML mapping keys are malformed YAML.
@@ -150,12 +150,25 @@ immediately before launch. Naming a shell explicitly remains possible project
 data; a broader executable allow/deny policy is still unresolved. Neither the
 parser nor direct process execution is a security sandbox.
 
+For newly created command-backed runs, the registered repository root in the
+snapshot is the trusted source checkout only. At allocation time the worker
+revalidates that checkout, resolves `repository.baseBranch` to an immutable
+commit, and creates the execution root under
+`<factory-state>/worktrees/<project-id>/<workspace-id>`. The snapshotted
+repository-relative `worktreeRoot` is retained for compatibility and future
+policy but is not used as an allocation destination in this Linux-first phase.
+This prevents checked-in configuration or browser input from choosing an
+arbitrary machine path. Older persisted runs remain readable; a pending legacy
+CommandRun without durable workspace ownership is not started and reconciles to
+operator attention.
+
 ## Deterministic resolved snapshot
 
 `ResolvedProjectConfiguration` contains:
 
 - schema version and stable project identity;
-- canonical absolute repository root and resolved worktree root;
+- canonical absolute repository root and the configured repository-relative
+  worktree-root compatibility value;
 - base branch and canonical context-file locations;
 - ordered setup commands and checks with all defaults materialized;
 - normalized repository-relative and canonical working directories;
@@ -167,6 +180,10 @@ Resolution time is registration metadata, not part of the configuration
 snapshot. Identical file bytes and registration inputs therefore produce
 semantically identical snapshots and digests. Environment references remain
 references; no environment or secret value enters the snapshot.
+
+The effective absolute allocation root is not part of the project snapshot. It
+is resolved under private factory state when a workspace is allocated and is
+persisted on the durable `Workspace` record as `effectiveWorktreeRoot`.
 
 ## Local project registration
 
@@ -225,7 +242,7 @@ browser CRUD surface.
 ## Deliberately deferred
 
 - executable allow/deny policy and shell-specific command types;
-- worktree creation or external worktree roots;
+- machine-local external worktree-root overrides and stronger workspace types;
 - global/project override precedence and schema migrations beyond rejecting
   unsupported versions;
 - a secret manager beyond environment references (execution-time resolution and

@@ -197,10 +197,30 @@ erDiagram
 
 ### Workspace
 
-- **Purpose:** owned worktree or later sandbox used by one WorkflowRun.
-- **Identity:** workspace ID; path is allocated data.
-- **Lifecycle:** allocating, ready, in-use, cleaning, released, orphaned.
-- **Prohibited:** destructive operations outside an ownership-marked root.
+- **Purpose:** factory-owned worktree, or later sandbox type, used by exactly one
+  WorkflowRun as its command execution root.
+- **Identity:** stable workspace ID; one active WorkflowRun has at most one
+  primary Workspace and canonical paths/branches are uniqueness-fenced.
+- **Lifecycle:** pending → allocating → ready → retained → cleanup_pending →
+  removed, with allocation_failed, missing, ownership_mismatch, modified,
+  cleanup_failed, and operator_attention exceptions.
+- **Fields:** source/canonical repository paths, Git common-directory identity,
+  requested base branch, resolved ref and immutable commit, deterministic branch,
+  configured and effective roots, canonical worktree path, pre-allocation claim
+  path, administrative marker path/digest, observed HEAD/branch/dirty metadata,
+  timestamps, failures, and optimistic version.
+- **Source of truth:** factory SQLite owns lifecycle; the transient allocation
+  claim, Git metadata, and administrative marker are external evidence
+  reconciled against the durable record.
+- **Mutable versus snapshotted:** allocation identity/base/branch/path are fixed
+  before side effects; observations, retention, cleanup, and failure state evolve.
+- **Prohibited:** using the registered primary checkout for new command-backed
+  runs, recreating missing active worktrees silently, force-removing dirty or
+  ambiguous directories, deleting the retained branch, or treating a worktree as
+  a security sandbox.
+- **Implemented:** migration 3, workflow-engine lifecycle methods,
+  `GitWorktreeWorkspaceManager`, worker reconciliation, and authenticated
+  read/cleanup endpoints.
 
 ### Approval
 

@@ -27,7 +27,11 @@ without separate explicit direction.
 - **Deterministic command foundation:** implemented as the first bounded part of
   Phase 6: LocalProcessHost, CommandRun migration, declared-check resolution,
   redacted output, timeout/cancellation, and human-review advancement.
-- **Phases 2–3, the worktree/agent remainder of Phase 6, and 7–13:** not started.
+- **Factory worktree foundation:** implemented as the next bounded part of Phase
+  6: additive Workspace persistence, immutable base resolution, factory-owned
+  branches/worktrees, ownership evidence, retention, safe cleanup, restart
+  reconciliation, and command execution in the worktree.
+- **Phases 2–3, the single-builder remainder of Phase 6, and 7–13:** not started.
 
 ## Phase 0: Land the audit documentation
 
@@ -153,8 +157,8 @@ without separate explicit direction.
 
 - **Goal:** exercise the smallest valuable durable path end to end.
 - **Prerequisites:** worker skeleton and one project config/profile are complete.
-  LocalProcessHost and deterministic command execution are now complete;
-  worker-owned worktree allocation and one bridged AgentRuntime remain.
+  LocalProcessHost, deterministic command execution, and worker-owned worktree
+  allocation are now complete; one bridged single-builder AgentRuntime remains.
 - **Affected:** worker stage handlers, runtime/process ports, VCS/worktree bridge,
   minimal server API/view.
 - **Target/future flow:** manual task → allocate worktree → launch one builder →
@@ -177,9 +181,15 @@ without separate explicit direction.
   stage resolves it from the stored snapshot, records CommandRun/output/events,
   treats exit zero as pass, fails terminally on a nonzero deterministic result,
   and stops passing work at human review. No agent repair occurs yet.
-- **Next exact slice:** allocate and durably own one disposable Git worktree,
-  then run this same selected check inside that workspace. Do not add agents,
-  repair loops, generalized workflows, Herdr, or publication in that slice.
+- **Implemented workspace subset:** command-backed runs durably record an exact
+  base commit, allocate one generated branch and factory-owned worktree, run the
+  selected check there, retain at review/terminal outcomes, reconcile after
+  restart, and remove only clean proven ownership through explicit cleanup.
+  Branch deletion, commits, pushes, and force cleanup remain excluded.
+- **Next exact slice:** bridge one existing coding runtime as a single builder in
+  the owned worktree with a bounded structured task/result contract. Do not add
+  multi-agent teams, generalized workflows, Herdr, publication, automatic
+  commits, or automatic repair loops in that slice.
 
 ## Phase 7: Expand the workflow
 
