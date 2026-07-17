@@ -320,22 +320,22 @@ const writeMarker = async (
     NodePath.dirname(path),
     `.${NodePath.basename(path)}.${NodeCrypto.randomUUID()}.tmp`,
   );
-  const handle = await NodeFSP.open(
-    temporaryPath,
-    NodeFS.constants.O_CREAT |
-      NodeFS.constants.O_EXCL |
-      NodeFS.constants.O_WRONLY |
-      (NodeFS.constants.O_NOFOLLOW ?? 0),
-    0o600,
-  );
   try {
-    await handle.writeFile(markerJson(marker), "utf8");
-    await handle.chmod(0o600);
-    await handle.sync();
-  } finally {
-    await handle.close();
-  }
-  try {
+    const handle = await NodeFSP.open(
+      temporaryPath,
+      NodeFS.constants.O_CREAT |
+        NodeFS.constants.O_EXCL |
+        NodeFS.constants.O_WRONLY |
+        (NodeFS.constants.O_NOFOLLOW ?? 0),
+      0o600,
+    );
+    try {
+      await handle.writeFile(markerJson(marker), "utf8");
+      await handle.chmod(0o600);
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
     await beforePublish?.();
     // A hard-link publish is atomic and, unlike rename, cannot replace existing evidence.
     await NodeFSP.link(temporaryPath, path);
