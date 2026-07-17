@@ -21,6 +21,7 @@
     "@mkcode/factory-contracts": "workspace:*",
     "@mkcode/project-config": "workspace:*",
     "@mkcode/workflow-engine": "workspace:*",
+    "@mkcode/workspace-manager": "workspace:*",
     "effect": "catalog:"
   },
   "devDependencies": {

@@ -3,9 +3,11 @@
 // @effect-diagnostics globalFetch:off -- This is an end-to-end test of the real HTTP listener.
 // @effect-diagnostics globalTimers:off -- Bounded polling verifies asynchronous worker progress.
 import * as NodeAssert from "node:assert/strict";
+import * as NodeChildProcess from "node:child_process";
 import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
+import * as NodeUtil from "node:util";
 
 import { describe, it } from "@effect/vitest";
 import type {
@@ -20,9 +22,35 @@ import { configFromEnvironment, resolveFactoryWorkerConfig } from "./config.ts";
 import { startFactoryWorker, type RunningFactoryWorker } from "./runtime.ts";
 
 const credential = "factory-test-credential-0123456789abcdef";
+const execFile = NodeUtil.promisify(NodeChildProcess.execFile);
 
 const makeRoot = async () =>
   NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "mkcode-factory-worker-"));
+
+const makeGitFixture = async () => {
+  const root = await makeRoot();
+  const repository = NodePath.join(root, "primary");
+  const stateDirectory = NodePath.join(root, "factory-state");
+  await NodeFSP.mkdir(repository);
+  await execFile("git", ["init", "-b", "main", repository]);
+  await NodeFSP.writeFile(NodePath.join(repository, "README.md"), "factory fixture\n");
+  await execFile("git", ["-C", repository, "add", "README.md"]);
+  await execFile("git", [
+    "-C",
+    repository,
+    "-c",
+    "user.name=MK Code Test",
+    "-c",
+    "user.email=mkcode@example.invalid",
+    "commit",
+    "-m",
+    "fixture",
+  ]);
+  const primaryHead = (
+    await execFile("git", ["-C", repository, "rev-parse", "HEAD"])
+  ).stdout.trim();
+  return { root, repository, stateDirectory, primaryHead };
+};
 
 const makeRequest = (root: string, key = "factory-http-create"): WorkflowCreateRequest => ({
   idempotencyKey: key,
@@ -129,6 +157,20 @@ const waitForCommandStatus = async (
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
   throw new Error(`Workflow ${runId} did not reach command status ${status}.`);
+};
+
+const waitForWorkspaceStatus = async (
+  worker: RunningFactoryWorker,
+  workspaceId: string,
+  status: string,
+) => {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    const response = await api<{ status: string }>(worker, `/v1/workspaces/${workspaceId}`);
+    if (response.body.status === status) return response.body;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`Workspace ${workspaceId} did not reach ${status}.`);
 };
 
 const waitForCommandOutput = async (
@@ -314,8 +356,8 @@ describe("factory worker API", () => {
   });
 
   it("executes a declared check, redacts output, and serves it after restart", async () => {
-    const root = await makeRoot();
-    const stateDirectory = NodePath.join(root, "state");
+    const fixture = await makeGitFixture();
+    const { root, repository, stateDirectory, primaryHead } = fixture;
     const secret = "runtime-acceptance-secret-marker";
     const priorSecret = process.env.MKCODE_COMMAND_TEST_SECRET;
     process.env.MKCODE_COMMAND_TEST_SECRET = secret;
@@ -333,9 +375,12 @@ describe("factory worker API", () => {
       const created = await api<WorkflowCreateResult>(worker, "/v1/workflows", {
         method: "POST",
         body: makeCommandRequest(
-          root,
+          repository,
           "command-passing",
-          ["-e", "console.log('lint passed ' + process.env.PROJECT_SECRET)"],
+          [
+            "-e",
+            "console.log('cwd=' + process.cwd()); console.log('lint passed ' + process.env.PROJECT_SECRET)",
+          ],
           {
             environment: [{ name: "PROJECT_SECRET", source: "MKCODE_COMMAND_TEST_SECRET" }],
           },
@@ -343,15 +388,40 @@ describe("factory worker API", () => {
       });
       const waiting = await waitForStatus(worker, created.body.workflowRun.id, "human_review");
       const command = waiting.commands[0];
+      const workspace = waiting.workspaces[0];
       NodeAssert.ok(command);
+      NodeAssert.ok(workspace);
       NodeAssert.equal(command.outcome, "passed");
+      NodeAssert.equal(workspace.status, "retained");
+      NodeAssert.equal(command.executionRoot, workspace.canonicalWorktreePath);
+      NodeAssert.notEqual(command.executionRoot, repository);
       const output = await api<CommandOutputPage>(
         worker,
         `/v1/commands/${command.id}/output?stream=stdout`,
       );
       NodeAssert.equal(output.status, 200);
       NodeAssert.match(output.body.data, /lint passed \[REDACTED\]/u);
+      NodeAssert.ok(workspace.canonicalWorktreePath);
+      NodeAssert.ok(output.body.data.includes(`cwd=${workspace.canonicalWorktreePath}`));
       NodeAssert.equal(output.body.data.includes(secret), false);
+      NodeAssert.equal(
+        (await execFile("git", ["-C", repository, "status", "--porcelain"])).stdout,
+        "",
+      );
+      NodeAssert.equal(
+        (await execFile("git", ["-C", repository, "branch", "--show-current"])).stdout.trim(),
+        "main",
+      );
+      NodeAssert.equal(
+        (await execFile("git", ["-C", repository, "rev-parse", "HEAD"])).stdout.trim(),
+        primaryHead,
+      );
+      NodeAssert.equal(
+        (await execFile("git", ["-C", repository, "worktree", "list", "--porcelain"])).stdout
+          .split("\n")
+          .filter((line) => line.startsWith("worktree ")).length,
+        2,
+      );
 
       await worker.stop();
       worker = await startFactoryWorker({
@@ -363,6 +433,11 @@ describe("factory worker API", () => {
         `/v1/commands/${command.id}/output?stream=stdout`,
       );
       NodeAssert.equal(recoveredOutput.body.data, output.body.data);
+      const recoveredWorkspace = await api<{ status: string }>(
+        worker,
+        `/v1/workflows/${created.body.workflowRun.id}/workspace`,
+      );
+      NodeAssert.equal(recoveredWorkspace.body.status, "retained");
       NodeAssert.ok(command.stderrArtifactReference);
       await NodeFSP.rm(NodePath.join(stateDirectory, command.stderrArtifactReference));
       const missingOutput = await api<{ code: string }>(
@@ -376,6 +451,7 @@ describe("factory worker API", () => {
         `/v1/events?runId=${created.body.workflowRun.id}`,
       );
       NodeAssert.ok(events.body.events.some((event) => event.eventType === "command.completed"));
+      NodeAssert.ok(events.body.events.some((event) => event.eventType === "workspace.ready"));
 
       const injection = await api<{ code: string }>(worker, "/v1/commands", {
         method: "POST",
@@ -383,6 +459,57 @@ describe("factory worker API", () => {
       });
       NodeAssert.equal(injection.status, 404);
       await NodeAssert.rejects(() => NodeFSP.stat(NodePath.join(root, "injected")));
+      const pathInjection = await api<{ code: string }>(
+        worker,
+        `/v1/workspaces/${workspace.id}/cleanup`,
+        {
+          method: "POST",
+          body: {
+            idempotencyKey: "path-injection",
+            requestedBy: "operator",
+            worktreePath: repository,
+            branchName: "main",
+          },
+        },
+      );
+      NodeAssert.equal(pathInjection.status, 400);
+      NodeAssert.equal(pathInjection.body.code, "invalid_request");
+
+      const approval = waiting.approvals[0];
+      NodeAssert.ok(approval);
+      const approved = await api<WorkflowDetail>(worker, `/v1/approvals/${approval.id}/resolve`, {
+        method: "POST",
+        body: { decision: "approved", resolvedBy: "operator" },
+      });
+      NodeAssert.equal(approved.body.workflowRun.status, "completed");
+      NodeAssert.equal(approved.body.workspaces[0]?.status, "retained");
+      const cleanup = await api<{ status: string }>(
+        worker,
+        `/v1/workspaces/${workspace.id}/cleanup`,
+        {
+          method: "POST",
+          body: { idempotencyKey: "runtime-cleanup", requestedBy: "operator" },
+        },
+      );
+      NodeAssert.equal(cleanup.status, 202);
+      NodeAssert.equal(cleanup.body.status, "cleanup_pending");
+      await waitForWorkspaceStatus(worker, workspace.id, "removed");
+      NodeAssert.equal(
+        (await execFile("git", ["-C", repository, "worktree", "list", "--porcelain"])).stdout
+          .split("\n")
+          .filter((line) => line.startsWith("worktree ")).length,
+        1,
+      );
+      NodeAssert.equal(
+        (
+          await execFile("git", ["-C", repository, "rev-parse", workspace.generatedBranchName!])
+        ).stdout.trim(),
+        workspace.resolvedBaseCommit,
+      );
+      NodeAssert.equal(
+        (await execFile("git", ["-C", repository, "status", "--porcelain"])).stdout,
+        "",
+      );
     } finally {
       if (priorSecret === undefined) delete process.env.MKCODE_COMMAND_TEST_SECRET;
       else process.env.MKCODE_COMMAND_TEST_SECRET = priorSecret;
@@ -392,12 +519,13 @@ describe("factory worker API", () => {
   });
 
   it("records nonzero declared checks as deterministic failures", async () => {
-    const root = await makeRoot();
+    const fixture = await makeGitFixture();
+    const { root, repository, stateDirectory } = fixture;
     const worker = await startFactoryWorker(
       resolveFactoryWorkerConfig({
         host: "127.0.0.1",
         port: 0,
-        stateDirectory: NodePath.join(root, "state"),
+        stateDirectory,
         credential,
         pollIntervalMilliseconds: 5,
         leaseMilliseconds: 1_000,
@@ -406,7 +534,7 @@ describe("factory worker API", () => {
     try {
       const created = await api<WorkflowCreateResult>(worker, "/v1/workflows", {
         method: "POST",
-        body: makeCommandRequest(root, "command-failing", [
+        body: makeCommandRequest(repository, "command-failing", [
           "-e",
           "console.error('lint failed'); process.exit(2)",
         ]),
@@ -421,13 +549,69 @@ describe("factory worker API", () => {
     }
   });
 
-  it("times out and durably cancels declared checks", async () => {
-    const root = await makeRoot();
+  it("fails allocation safely when the snapshotted base branch is missing", async () => {
+    const fixture = await makeGitFixture();
+    const { root, repository, stateDirectory, primaryHead } = fixture;
     const worker = await startFactoryWorker(
       resolveFactoryWorkerConfig({
         host: "127.0.0.1",
         port: 0,
-        stateDirectory: NodePath.join(root, "state"),
+        stateDirectory,
+        credential,
+        pollIntervalMilliseconds: 5,
+        leaseMilliseconds: 1_000,
+      }),
+    );
+    try {
+      const request = makeCommandRequest(repository, "missing-base-branch", [
+        "-e",
+        "console.log('must not run')",
+      ]);
+      const created = await api<WorkflowCreateResult>(worker, "/v1/workflows", {
+        method: "POST",
+        body: {
+          ...request,
+          projectSnapshot: {
+            ...request.projectSnapshot,
+            repository: {
+              ...request.projectSnapshot.repository,
+              baseBranch: "branch-that-does-not-exist",
+            },
+          },
+        },
+      });
+      const failed = await waitForStatus(worker, created.body.workflowRun.id, "failed");
+      NodeAssert.equal(failed.workspaces[0]?.status, "allocation_failed");
+      NodeAssert.equal(failed.workspaces[0]?.failureClassification, "base_ref_missing");
+      NodeAssert.deepEqual(failed.commands, []);
+      NodeAssert.equal(
+        (await execFile("git", ["-C", repository, "status", "--porcelain"])).stdout,
+        "",
+      );
+      NodeAssert.equal(
+        (await execFile("git", ["-C", repository, "rev-parse", "HEAD"])).stdout.trim(),
+        primaryHead,
+      );
+      NodeAssert.equal(
+        (await execFile("git", ["-C", repository, "worktree", "list", "--porcelain"])).stdout
+          .split("\n")
+          .filter((line) => line.startsWith("worktree ")).length,
+        1,
+      );
+    } finally {
+      await worker.stop();
+      await NodeFSP.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("times out and durably cancels declared checks", async () => {
+    const fixture = await makeGitFixture();
+    const { root, repository, stateDirectory } = fixture;
+    const worker = await startFactoryWorker(
+      resolveFactoryWorkerConfig({
+        host: "127.0.0.1",
+        port: 0,
+        stateDirectory,
         credential,
         pollIntervalMilliseconds: 5,
         leaseMilliseconds: 1_000,
@@ -436,9 +620,14 @@ describe("factory worker API", () => {
     try {
       const timed = await api<WorkflowCreateResult>(worker, "/v1/workflows", {
         method: "POST",
-        body: makeCommandRequest(root, "command-timeout", ["-e", "setInterval(() => {}, 1000)"], {
-          timeoutSeconds: 1,
-        }),
+        body: makeCommandRequest(
+          repository,
+          "command-timeout",
+          ["-e", "setInterval(() => {}, 1000)"],
+          {
+            timeoutSeconds: 1,
+          },
+        ),
       });
       const timedOut = await waitForCommandStatus(worker, timed.body.workflowRun.id, "timed_out");
       NodeAssert.equal(timedOut.workflowRun.status, "failed");
@@ -446,7 +635,7 @@ describe("factory worker API", () => {
 
       const cancellable = await api<WorkflowCreateResult>(worker, "/v1/workflows", {
         method: "POST",
-        body: makeCommandRequest(root, "command-cancel", [
+        body: makeCommandRequest(repository, "command-cancel", [
           "-e",
           "setInterval(() => console.log('waiting'), 25)",
         ]),
@@ -472,6 +661,166 @@ describe("factory worker API", () => {
       NodeAssert.equal(durable.commands[0]?.cancelled, true);
       const withOutput = await waitForCommandOutput(worker, command.id);
       NodeAssert.ok(withOutput.stdoutObservedBytes > 0);
+      const cancelledWorkspace = durable.workspaces[0];
+      NodeAssert.ok(cancelledWorkspace);
+      await waitForWorkspaceStatus(worker, cancelledWorkspace.id, "removed");
+      NodeAssert.equal(
+        (await execFile("git", ["-C", repository, "worktree", "list", "--porcelain"])).stdout
+          .split("\n")
+          .filter((line) => line.startsWith("worktree ")).length,
+        2,
+      );
+    } finally {
+      await worker.stop();
+      await NodeFSP.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses dirty-worktree cleanup and leaves the primary checkout unchanged", async () => {
+    const fixture = await makeGitFixture();
+    const { root, repository, stateDirectory, primaryHead } = fixture;
+    const worker = await startFactoryWorker(
+      resolveFactoryWorkerConfig({
+        host: "127.0.0.1",
+        port: 0,
+        stateDirectory,
+        credential,
+        pollIntervalMilliseconds: 5,
+        leaseMilliseconds: 1_000,
+      }),
+    );
+    try {
+      const created = await api<WorkflowCreateResult>(worker, "/v1/workflows", {
+        method: "POST",
+        body: makeCommandRequest(repository, "dirty-worktree", [
+          "-e",
+          "require('node:fs').writeFileSync('generated-by-check.txt', 'deliberate side effect\\n')",
+        ]),
+      });
+      const waiting = await waitForStatus(worker, created.body.workflowRun.id, "human_review");
+      const workspace = waiting.workspaces[0];
+      const approval = waiting.approvals[0];
+      NodeAssert.ok(workspace?.canonicalWorktreePath);
+      NodeAssert.ok(approval);
+      NodeAssert.equal(
+        await NodeFSP.readFile(
+          NodePath.join(workspace.canonicalWorktreePath, "generated-by-check.txt"),
+          "utf8",
+        ),
+        "deliberate side effect\n",
+      );
+      await api<WorkflowDetail>(worker, `/v1/approvals/${approval.id}/resolve`, {
+        method: "POST",
+        body: { decision: "approved", resolvedBy: "operator" },
+      });
+      await api(worker, `/v1/workspaces/${workspace.id}/cleanup`, {
+        method: "POST",
+        body: { idempotencyKey: "dirty-cleanup", requestedBy: "operator" },
+      });
+      await waitForWorkspaceStatus(worker, workspace.id, "modified");
+      NodeAssert.equal(
+        await NodeFSP.readFile(
+          NodePath.join(workspace.canonicalWorktreePath, "generated-by-check.txt"),
+          "utf8",
+        ),
+        "deliberate side effect\n",
+      );
+      NodeAssert.equal(
+        (await execFile("git", ["-C", repository, "status", "--porcelain"])).stdout,
+        "",
+      );
+      NodeAssert.equal(
+        (await execFile("git", ["-C", repository, "rev-parse", "HEAD"])).stdout.trim(),
+        primaryHead,
+      );
+    } finally {
+      await worker.stop();
+      await NodeFSP.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("retains a rejected human-review worktree for inspection", async () => {
+    const fixture = await makeGitFixture();
+    const { root, repository, stateDirectory } = fixture;
+    const worker = await startFactoryWorker(
+      resolveFactoryWorkerConfig({
+        host: "127.0.0.1",
+        port: 0,
+        stateDirectory,
+        credential,
+        pollIntervalMilliseconds: 5,
+        leaseMilliseconds: 1_000,
+      }),
+    );
+    try {
+      const created = await api<WorkflowCreateResult>(worker, "/v1/workflows", {
+        method: "POST",
+        body: makeCommandRequest(repository, "rejected-workspace", ["-e", "console.log('pass')"]),
+      });
+      const waiting = await waitForStatus(worker, created.body.workflowRun.id, "human_review");
+      const workspace = waiting.workspaces[0];
+      const approval = waiting.approvals[0];
+      NodeAssert.ok(workspace?.canonicalWorktreePath);
+      NodeAssert.ok(approval);
+      const rejected = await api<WorkflowDetail>(worker, `/v1/approvals/${approval.id}/resolve`, {
+        method: "POST",
+        body: { decision: "rejected", resolvedBy: "operator" },
+      });
+      NodeAssert.equal(rejected.body.workflowRun.status, "rejected");
+      NodeAssert.equal(rejected.body.workspaces[0]?.status, "retained");
+      NodeAssert.equal(
+        await NodeFSP.realpath(workspace.canonicalWorktreePath),
+        workspace.canonicalWorktreePath,
+      );
+      NodeAssert.equal(
+        (await execFile("git", ["-C", repository, "status", "--porcelain"])).stdout,
+        "",
+      );
+    } finally {
+      await worker.stop();
+      await NodeFSP.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("routes a missing retained worktree to operator attention after restart", async () => {
+    const fixture = await makeGitFixture();
+    const { root, repository, stateDirectory } = fixture;
+    const config = resolveFactoryWorkerConfig({
+      host: "127.0.0.1",
+      port: 0,
+      stateDirectory,
+      credential,
+      pollIntervalMilliseconds: 5,
+      leaseMilliseconds: 1_000,
+    });
+    let worker = await startFactoryWorker(config);
+    try {
+      const created = await api<WorkflowCreateResult>(worker, "/v1/workflows", {
+        method: "POST",
+        body: makeCommandRequest(repository, "missing-after-restart", [
+          "-e",
+          "console.log('pass')",
+        ]),
+      });
+      const waiting = await waitForStatus(worker, created.body.workflowRun.id, "human_review");
+      const workspace = waiting.workspaces[0];
+      NodeAssert.ok(workspace?.canonicalWorktreePath);
+      await worker.stop();
+      await execFile("git", [
+        "-C",
+        repository,
+        "worktree",
+        "remove",
+        workspace.canonicalWorktreePath,
+      ]);
+      worker = await startFactoryWorker({ ...config, workerInstanceId: "missing-reconciler" });
+      const detail = await api<WorkflowDetail>(
+        worker,
+        `/v1/workflows/${created.body.workflowRun.id}`,
+      );
+      NodeAssert.equal(detail.body.workflowRun.status, "operator_attention");
+      NodeAssert.equal(detail.body.workspaces[0]?.status, "missing");
+      NodeAssert.equal(detail.body.workspaces[0]?.gitMetadataState, "branch_without_worktree");
     } finally {
       await worker.stop();
       await NodeFSP.rm(root, { recursive: true, force: true });
