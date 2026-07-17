@@ -185,6 +185,39 @@ describe("GitWorktreeWorkspaceManager", () => {
     NodeAssert.equal((await git(fixture.repository, "status", "--porcelain")).stdout, "");
   });
 
+  it("discards only a matching pre-allocation claim when no Git side effect exists", async () => {
+    const fixture = await makeRepository();
+    const manager = new GitWorktreeWorkspaceManager();
+    const value = await plan(manager, fixture);
+    const input = {
+      workspaceId: value.workspaceId,
+      workflowRunId: value.workflowRunId,
+      projectId: value.projectId,
+      canonicalSourceRepositoryPath: value.canonicalSourceRepositoryPath,
+      gitCommonDirectory: value.gitCommonDirectory,
+      canonicalWorktreePath: value.worktreePath,
+      branchName: value.branchName,
+      resolvedBaseCommit: value.resolvedBaseCommit,
+      ownershipClaimPath: value.ownershipClaimPath,
+      ownershipMarkerDigest: value.markerDigest,
+    };
+    await NodeFSP.mkdir(NodePath.dirname(value.ownershipClaimPath), {
+      recursive: true,
+      mode: 0o700,
+    });
+    await NodeFSP.writeFile(value.ownershipClaimPath, `${JSON.stringify(value.marker)}\n`, {
+      mode: 0o600,
+    });
+
+    const inspection = await manager.inspect(input);
+    NodeAssert.equal(inspection.state, "missing");
+    NodeAssert.equal(inspection.claimValid, true);
+    NodeAssert.equal(inspection.gitMetadataState, "ownership_claim_without_side_effect");
+    await manager.discardAllocationClaim(input);
+    await NodeAssert.rejects(() => NodeFSP.lstat(value.ownershipClaimPath));
+    NodeAssert.equal((await manager.inspect(input)).gitMetadataState, "absent");
+  });
+
   it("records a dirty primary checkout but does not copy its change", async () => {
     const fixture = await makeRepository();
     await NodeFSP.writeFile(NodePath.join(fixture.repository, "README.md"), "dirty primary\n");

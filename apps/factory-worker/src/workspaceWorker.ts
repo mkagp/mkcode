@@ -183,9 +183,22 @@ export class WorkspaceExecutionWorker {
           });
         } else if (
           inspection.state === "missing" &&
-          inspection.gitMetadataState === "absent" &&
+          ["absent", "ownership_claim_without_side_effect"].includes(inspection.gitMetadataState) &&
           !inspection.gitMetadataPresent
         ) {
+          if (inspection.claimValid) {
+            try {
+              await this.#manager.discardAllocationClaim(input);
+            } catch {
+              this.#engine.recordWorkspaceInspection(workspace.id, {
+                matching: false,
+                state: "ownership_ambiguous",
+                reason: "Pre-allocation ownership claim could not be discarded safely.",
+                gitMetadataState: "claim_discard_failed",
+              });
+              continue;
+            }
+          }
           this.#engine.resetInterruptedWorkspaceAllocation(workspace.id);
         } else {
           this.#engine.recordWorkspaceInspection(workspace.id, inspectionEvidence(inspection));

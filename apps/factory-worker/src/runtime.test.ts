@@ -17,6 +17,7 @@ import type {
   WorkflowCreateResult,
   WorkflowDetail,
 } from "@mkcode/factory-contracts";
+import { GitWorktreeWorkspaceManager } from "@mkcode/workspace-manager";
 
 import { configFromEnvironment, resolveFactoryWorkerConfig } from "./config.ts";
 import { startFactoryWorker, type RunningFactoryWorker } from "./runtime.ts";
@@ -821,6 +822,88 @@ describe("factory worker API", () => {
       NodeAssert.equal(detail.body.workflowRun.status, "operator_attention");
       NodeAssert.equal(detail.body.workspaces[0]?.status, "missing");
       NodeAssert.equal(detail.body.workspaces[0]?.gitMetadataState, "branch_without_worktree");
+    } finally {
+      await worker.stop();
+      await NodeFSP.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("restarts allocation after safely discarding a matching claim with no Git side effect", async () => {
+    const fixture = await makeGitFixture();
+    const { root, repository, stateDirectory } = fixture;
+    const config = resolveFactoryWorkerConfig({
+      host: "127.0.0.1",
+      port: 0,
+      stateDirectory,
+      credential,
+      workerInstanceId: "claim-recovery-worker",
+      pollIntervalMilliseconds: 60_000,
+      leaseMilliseconds: 10_000,
+    });
+    let worker = await startFactoryWorker(config);
+    try {
+      const created = await api<WorkflowCreateResult>(worker, "/v1/workflows", {
+        method: "POST",
+        body: makeCommandRequest(repository, "claim-before-git-restart", ["-e", "process.exit(0)"]),
+      });
+      const detail = worker.engine.readWorkflow(created.body.workflowRun.id);
+      const workspace = detail.workspaces[0];
+      const claimed = worker.engine.claimNextJob("claim-recovery-worker", 10_000);
+      NodeAssert.ok(workspace);
+      NodeAssert.ok(claimed);
+      const manager = new GitWorktreeWorkspaceManager();
+      const plan = await manager.plan({
+        workspaceId: workspace.id,
+        workflowRunId: workspace.workflowRunId,
+        projectId: workspace.projectId,
+        sourceRepositoryPath: workspace.sourceRepositoryPath,
+        requestedBaseBranch: workspace.requestedBaseBranch,
+        configuredWorktreeRoot: workspace.configuredWorktreeRoot,
+        factoryStateRoot: stateDirectory,
+        createdAt: workspace.createdAt,
+        ownershipNonce: "claim-before-git-nonce",
+      });
+      worker.engine.beginWorkspaceAllocation({
+        workspaceId: workspace.id,
+        jobId: claimed.job.id,
+        leaseOwner: "claim-recovery-worker",
+        expectedStageVersion: claimed.stageVersion,
+        evidence: {
+          canonicalSourceRepositoryPath: plan.canonicalSourceRepositoryPath,
+          gitCommonDirectory: plan.gitCommonDirectory,
+          ...(plan.resolvedBaseReference
+            ? { resolvedBaseReference: plan.resolvedBaseReference }
+            : {}),
+          resolvedBaseCommit: plan.resolvedBaseCommit,
+          baseResolvedAt: plan.baseResolvedAt,
+          generatedBranchName: plan.branchName,
+          worktreePath: plan.worktreePath,
+          effectiveWorktreeRoot: plan.effectiveWorktreeRoot,
+          ownershipClaimPath: plan.ownershipClaimPath,
+          ownershipMarkerDigest: plan.markerDigest,
+        },
+      });
+      await NodeFSP.mkdir(NodePath.dirname(plan.ownershipClaimPath), {
+        recursive: true,
+        mode: 0o700,
+      });
+      await NodeFSP.writeFile(plan.ownershipClaimPath, `${JSON.stringify(plan.marker)}\n`, {
+        mode: 0o600,
+      });
+
+      await worker.stop();
+      worker = await startFactoryWorker({ ...config, workerInstanceId: "claim-reconciler" });
+      const recovered = worker.engine.readWorkflow(created.body.workflowRun.id);
+      NodeAssert.equal(recovered.workflowRun.status, "allocating_workspace");
+      NodeAssert.equal(recovered.workspaces[0]?.status, "pending");
+      NodeAssert.equal(recovered.jobs[0]?.status, "pending");
+      await NodeAssert.rejects(() => NodeFSP.lstat(plan.ownershipClaimPath));
+      NodeAssert.equal(
+        (await execFile("git", ["-C", repository, "worktree", "list", "--porcelain"])).stdout
+          .split("\n")
+          .filter((line) => line.startsWith("worktree ")).length,
+        1,
+      );
     } finally {
       await worker.stop();
       await NodeFSP.rm(root, { recursive: true, force: true });

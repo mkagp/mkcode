@@ -840,6 +840,19 @@ export class WorkflowEngine {
         throw new WorkflowEngineError("not_found", "Workspace allocation job was not found.");
       const job = this.#mapJob(jobRow);
       const stage = this.#findStage(job.stageRunId);
+      const run = this.#findWorkflowRun(workspace.workflowRunId);
+      if (
+        run.status !== "allocating_workspace" ||
+        job.workflowRunId !== run.id ||
+        !["pending", "claimed"].includes(job.status) ||
+        stage.stageKey !== "allocating_workspace" ||
+        !["queued", "running"].includes(stage.status)
+      ) {
+        throw new WorkflowEngineError(
+          "invalid_transition",
+          "Workspace allocation recovery cannot advance an inactive workflow, job, or stage.",
+        );
+      }
       const now = this.#now();
       this.#database
         .prepare(
@@ -1026,6 +1039,15 @@ export class WorkflowEngine {
         );
       const run = this.#findWorkflowRun(workspace.workflowRunId);
       if (!terminalRunStatuses.has(run.status)) {
+        const reason = evidence.reason ?? evidence.state;
+        const activeCommands = (
+          this.#database
+            .prepare(
+              `SELECT * FROM command_runs WHERE workflow_run_id = ?
+               AND status IN ('pending','starting','running','cancelling')`,
+            )
+            .all(run.id) as ReadonlyArray<SqlRow>
+        ).map(this.#mapCommandRun);
         this.#database
           .prepare(
             `UPDATE workflow_runs SET status = 'operator_attention',
@@ -1039,10 +1061,46 @@ export class WorkflowEngine {
              lease_expiration = NULL, updated_at = ?
              WHERE workflow_run_id = ? AND status IN ('pending','claimed')`,
           )
-          .run(evidence.reason ?? evidence.state, now, run.id);
+          .run(reason, now, run.id);
+        this.#database
+          .prepare(
+            `UPDATE attempts SET status = 'failed', completed_at = ?, failure_summary = ?
+             WHERE stage_run_id IN (
+               SELECT id FROM stage_runs WHERE workflow_run_id = ?
+             ) AND status = 'running'`,
+          )
+          .run(now, reason, run.id);
+        this.#database
+          .prepare(
+            `UPDATE command_runs SET status = 'operator_attention',
+             outcome = 'operator_attention', completed_at = ?, failure_classification = ?,
+             version = version + 1 WHERE workflow_run_id = ?
+             AND status IN ('pending','starting','running','cancelling')`,
+          )
+          .run(now, reason, run.id);
+        this.#database
+          .prepare(
+            `UPDATE stage_runs SET status = 'operator_attention', completed_at = ?,
+             outcome = 'operator_attention', failure_classification = ?, version = version + 1
+             WHERE workflow_run_id = ? AND status IN ('queued','running','waiting_approval')`,
+          )
+          .run(now, reason, run.id);
+        this.#database
+          .prepare(
+            `UPDATE approvals SET status = 'cancelled', resolved_at = ?,
+             resolved_by = 'workspace-reconciliation'
+             WHERE workflow_run_id = ? AND status = 'pending'`,
+          )
+          .run(now, run.id);
+        for (const command of activeCommands) {
+          this.#insertEvent(run.id, "command.operator_attention_required", {
+            commandRunId: command.id,
+            reason,
+          });
+        }
         this.#insertEvent(run.id, "workflow.operator_attention", {
           workspaceId: workspace.id,
-          reason: evidence.reason ?? evidence.state,
+          reason,
         });
       }
       this.#insertEvent(run.id, "workspace.operator_attention_required", {

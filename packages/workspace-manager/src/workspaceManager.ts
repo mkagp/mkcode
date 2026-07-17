@@ -157,6 +157,7 @@ export interface WorkspaceManager {
   allocate(plan: WorkspaceAllocationPlan): Promise<AllocatedWorkspace>;
   resume(input: InspectWorkspaceInput): Promise<AllocatedWorkspace>;
   inspect(input: InspectWorkspaceInput): Promise<WorkspaceInspection>;
+  discardAllocationClaim(input: InspectWorkspaceInput): Promise<void>;
   retain(input: InspectWorkspaceInput): Promise<WorkspaceInspection>;
   remove(input: InspectWorkspaceInput): Promise<WorkspaceRemovalResult>;
 }
@@ -829,16 +830,40 @@ export class GitWorktreeWorkspaceManager implements WorkspaceManager {
       if (!(cause instanceof WorkspaceManagerError) || cause.code !== "git_failed") throw cause;
     }
     if (!(await exists(expectedPath))) {
+      const claimPresent = input.ownershipClaimPath
+        ? await exists(input.ownershipClaimPath)
+        : false;
+      const claim =
+        claimPresent && input.ownershipClaimPath
+          ? await readMarker(input.ownershipClaimPath)
+          : undefined;
+      const claimValid =
+        !metadata.present &&
+        !branchPresent &&
+        claim?.digest === input.ownershipMarkerDigest &&
+        markerMatchesInspection(claim.marker, input);
+      if (claimPresent && !claimValid && !metadata.present && !branchPresent) {
+        return {
+          state: "ownership_mismatch",
+          gitMetadataPresent: false,
+          markerValid: false,
+          gitMetadataState: "allocation_claim_mismatch",
+          reason: "The pre-allocation ownership claim does not match durable workspace state.",
+        };
+      }
       return {
         state: "missing",
         gitMetadataPresent: metadata.present,
         markerValid: false,
+        ...(claimValid ? { claimValid: true } : {}),
         locked: metadata.locked,
-        gitMetadataState: metadata.present
-          ? "registered_path_missing"
-          : branchPresent
-            ? "branch_without_worktree"
-            : "absent",
+        gitMetadataState: claimValid
+          ? "ownership_claim_without_side_effect"
+          : metadata.present
+            ? "registered_path_missing"
+            : branchPresent
+              ? "branch_without_worktree"
+              : "absent",
         reason: branchPresent
           ? "The factory branch exists without its owned worktree."
           : "The factory worktree path is missing.",
@@ -1008,6 +1033,45 @@ export class GitWorktreeWorkspaceManager implements WorkspaceManager {
       locked: metadata.locked,
       gitMetadataState: "registered",
     };
+  }
+
+  async discardAllocationClaim(input: InspectWorkspaceInput): Promise<void> {
+    if (!input.ownershipClaimPath) {
+      throw new WorkspaceManagerError(
+        "ownership_mismatch",
+        "Workspace allocation has no durable ownership claim path.",
+      );
+    }
+    const inspection = await this.inspect(input);
+    if (
+      inspection.state !== "missing" ||
+      inspection.claimValid !== true ||
+      inspection.gitMetadataPresent ||
+      inspection.gitMetadataState !== "ownership_claim_without_side_effect"
+    ) {
+      throw new WorkspaceManagerError(
+        "ownership_ambiguous",
+        "Workspace allocation claim cannot be discarded after a possible Git side effect.",
+      );
+    }
+    const claim = await readMarker(input.ownershipClaimPath);
+    if (
+      claim?.digest !== input.ownershipMarkerDigest ||
+      !markerMatchesInspection(claim.marker, input)
+    ) {
+      throw new WorkspaceManagerError(
+        "ownership_mismatch",
+        "Workspace allocation claim changed before it could be discarded.",
+      );
+    }
+    const stat = await NodeFSP.lstat(input.ownershipClaimPath);
+    if (!stat.isFile() || stat.isSymbolicLink()) {
+      throw new WorkspaceManagerError(
+        "ownership_mismatch",
+        "Workspace allocation claim is not a regular factory-owned file.",
+      );
+    }
+    await NodeFSP.unlink(input.ownershipClaimPath);
   }
 
   retain(input: InspectWorkspaceInput): Promise<WorkspaceInspection> {

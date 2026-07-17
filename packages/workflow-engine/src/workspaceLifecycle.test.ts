@@ -205,4 +205,63 @@ describe("durable workspace lifecycle", () => {
     NodeAssert.equal(recovered.commands[0]?.executionRoot, NodePath.join(root, "factory-worktree"));
     engine.close();
   });
+
+  it("does not recover an allocating workspace after its workflow is cancelled", async () => {
+    const root = await makeRoot();
+    const engine = await WorkflowEngine.open({ stateDirectory: NodePath.join(root, "state") });
+    const created = createWorkspaceWorkflow(engine, root);
+    const workspace = engine.readWorkflow(created.workflowRun.id).workspaces[0];
+    const claimed = engine.claimNextJob("workspace-worker");
+    NodeAssert.ok(workspace);
+    NodeAssert.ok(claimed);
+    engine.beginWorkspaceAllocation({
+      workspaceId: workspace.id,
+      jobId: claimed.job.id,
+      leaseOwner: "workspace-worker",
+      expectedStageVersion: claimed.stageVersion,
+      evidence: planEvidence(root, created.workflowRun.id),
+    });
+    engine.cancelWorkflow(created.workflowRun.id, { requestedBy: "operator" });
+
+    NodeAssert.throws(() =>
+      engine.recoverWorkspaceAllocation(workspace.id, readyEvidence(root, created.workflowRun.id)),
+    );
+    const detail = engine.readWorkflow(created.workflowRun.id);
+    NodeAssert.equal(detail.workflowRun.status, "cancelled");
+    NodeAssert.equal(detail.jobs[0]?.status, "cancelled");
+    NodeAssert.equal(detail.stages[0]?.status, "cancelled");
+    NodeAssert.equal(detail.commands.length, 0);
+    engine.close();
+  });
+
+  it("terminalizes active validation records when workspace ownership becomes ambiguous", async () => {
+    const root = await makeRoot();
+    const engine = await WorkflowEngine.open({ stateDirectory: NodePath.join(root, "state") });
+    const { created, workspace } = allocate(engine, root);
+    const claimed = engine.claimNextJob("command-worker");
+    NodeAssert.ok(claimed);
+    NodeAssert.equal(claimed.job.jobType, "command.execute");
+
+    engine.recordWorkspaceInspection(workspace.id, {
+      matching: false,
+      state: "ownership_mismatch",
+      reason: "Ownership marker digest changed.",
+      gitMetadataState: "marker_mismatch",
+    });
+
+    const detail = engine.readWorkflow(created.workflowRun.id);
+    NodeAssert.equal(detail.workflowRun.status, "operator_attention");
+    NodeAssert.equal(detail.jobs.find((job) => job.id === claimed.job.id)?.status, "failed");
+    NodeAssert.equal(detail.commands[0]?.status, "operator_attention");
+    NodeAssert.equal(detail.commands[0]?.outcome, "operator_attention");
+    NodeAssert.equal(
+      detail.stages.find((stage) => stage.stageKey === "validating")?.status,
+      "operator_attention",
+    );
+    NodeAssert.equal(
+      detail.attempts.find((attempt) => attempt.stageRunId === claimed.job.stageRunId)?.status,
+      "failed",
+    );
+    engine.close();
+  });
 });
