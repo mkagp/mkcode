@@ -1,6 +1,8 @@
 // @effect-diagnostics globalTimers:off -- This transport owns a bounded HTTP request deadline.
 import {
   ApprovalResolveRequest,
+  AgentOutputPage,
+  AgentRun,
   CommandOutputPage,
   CommandRun,
   EventsListResult,
@@ -14,6 +16,8 @@ import {
   Workspace,
   WorkspaceActionRequest,
   type ApprovalResolveRequest as ApprovalResolveRequestType,
+  type AgentOutputPage as AgentOutputPageType,
+  type AgentRun as AgentRunType,
   type CommandOutputPage as CommandOutputPageType,
   type CommandRun as CommandRunType,
   type EventsListResult as EventsListResultType,
@@ -34,6 +38,10 @@ const MAX_REQUEST_TIMEOUT_MILLISECONDS = 2_147_483_647;
 
 const decodeHealth = Schema.decodeUnknownSync(FactoryHealth, { onExcessProperty: "error" });
 const decodeCommand = Schema.decodeUnknownSync(CommandRun, { onExcessProperty: "error" });
+const decodeAgentRun = Schema.decodeUnknownSync(AgentRun, { onExcessProperty: "error" });
+const decodeAgentOutput = Schema.decodeUnknownSync(AgentOutputPage, {
+  onExcessProperty: "error",
+});
 const decodeCommandOutput = Schema.decodeUnknownSync(CommandOutputPage, {
   onExcessProperty: "error",
 });
@@ -150,6 +158,38 @@ export class FactoryWorkerClient {
 
   async readCommand(commandRunId: string): Promise<CommandRunType> {
     return decodeCommand(await this.#request(`/v1/commands/${encodeURIComponent(commandRunId)}`));
+  }
+
+  async readAgentRun(agentRunId: string): Promise<AgentRunType> {
+    return decodeAgentRun(await this.#request(`/v1/agent-runs/${encodeURIComponent(agentRunId)}`));
+  }
+
+  async readAgentOutput(input: {
+    readonly agentRunId: string;
+    readonly stream: "stdout" | "stderr";
+    readonly cursor?: number;
+    readonly limit?: number;
+  }): Promise<AgentOutputPageType> {
+    const query = new URLSearchParams({ stream: input.stream });
+    if (input.cursor !== undefined) query.set("cursor", String(input.cursor));
+    if (input.limit !== undefined) query.set("limit", String(input.limit));
+    return decodeAgentOutput(
+      await this.#request(
+        `/v1/agent-runs/${encodeURIComponent(input.agentRunId)}/output?${query.toString()}`,
+      ),
+    );
+  }
+
+  async cancelAgentRun(
+    agentRunId: string,
+    input: WorkflowCancelRequestType,
+  ): Promise<WorkflowDetailType> {
+    return decodeWorkflowDetail(
+      await this.#request(`/v1/agent-runs/${encodeURIComponent(agentRunId)}/cancel`, {
+        method: "POST",
+        body: JSON.stringify(encodeCancel(input)),
+      }),
+    );
   }
 
   async readCommandOutput(input: {

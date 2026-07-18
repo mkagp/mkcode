@@ -29,7 +29,8 @@ Minimal project configuration and local project registration are implemented.
 The server can validate a checked-in `.mkcode/project.yaml`, store an isolated
 local registration, and expose browser-safe `projectRegistry.*` contracts.
 
-The durable factory-worker and deterministic command/workspace foundation are
+The durable factory-worker, deterministic command/workspace foundation, and
+one provider-neutral single-builder path are
 implemented in `apps/factory-worker`, `packages/factory-contracts`, and
 `packages/workflow-engine`, with process execution isolated in
 `packages/command-runner` and Git effects isolated in
@@ -39,8 +40,12 @@ human approval, CommandRuns, redacted file-backed output, recovery, and an
 authenticated loopback API. A selected validation check is resolved only from
 the immutable run snapshot and invoked without a shell inside a factory-owned
 worktree created from a recorded immutable base commit. Worktrees are retained
-for human review and require proven ownership for cleanup. Coding agents,
-providers, Herdr, and external integrations are not launched.
+for human review and require proven ownership for cleanup. A built-in
+`single-builder` role now runs through `AgentRuntime` and the first
+`CodexAgentRuntime` adapter. Runtime completion is evidence only: post-run Git
+policy inspection must pass and the declared check must exit successfully
+before human review. Multiple agents, repair loops, Herdr, and external
+integrations remain deferred.
 
 MK Code does not seek full T3 Code feature parity. Desktop, mobile, marketing,
 T3 Connect, relay infrastructure, and public T3 distribution remain present
@@ -81,6 +86,10 @@ Architecture decisions:
 - [0013: Factory worktree ownership](DECISIONS/0013-factory-worktree-ownership.md)
 - [0014: Workspace retention and cleanup](DECISIONS/0014-workspace-retention-and-cleanup.md)
 - [0015: Workspace reconciliation](DECISIONS/0015-workspace-reconciliation.md)
+- [0016: Provider-neutral agent runtime](DECISIONS/0016-provider-neutral-agent-runtime.md)
+- [0017: Factory AgentRun ownership](DECISIONS/0017-factory-agent-run-ownership.md)
+- [0018: Single-builder runtime adapter](DECISIONS/0018-single-builder-runtime-adapter.md)
+- [0019: Agent worktree policy enforcement](DECISIONS/0019-agent-worktree-policy-enforcement.md)
 
 ## Terminology
 

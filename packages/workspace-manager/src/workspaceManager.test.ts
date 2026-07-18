@@ -150,6 +150,17 @@ describe("GitWorktreeWorkspaceManager", () => {
     const replayed = await manager.allocate(value);
     NodeAssert.equal(replayed.canonicalWorktreePath, allocated.canonicalWorktreePath);
     NodeAssert.equal(replayed.ownershipMarkerDigest, allocated.ownershipMarkerDigest);
+    await NodeFSP.writeFile(
+      NodePath.join(allocated.canonicalWorktreePath, "builder-output.txt"),
+      "bounded edit\n",
+      "utf8",
+    );
+    const evidence = await manager.captureGitEvidence(inspectionInput(value, allocated));
+    NodeAssert.equal(evidence.head, primaryHead);
+    NodeAssert.equal(evidence.branch, value.branchName);
+    NodeAssert.deepEqual(evidence.untrackedPaths, ["builder-output.txt"]);
+    NodeAssert.equal(evidence.dirty, true);
+    NodeAssert.equal(evidence.ownershipMarkerDigest, allocated.ownershipMarkerDigest);
   });
 
   it("resumes a matching allocation interrupted immediately after Git adds the worktree", async () => {
@@ -183,6 +194,60 @@ describe("GitWorktreeWorkspaceManager", () => {
     NodeAssert.equal((await manager.inspect(inspectionInput(value, allocated))).state, "matching");
     await NodeAssert.rejects(() => NodeFSP.stat(value.ownershipClaimPath));
     NodeAssert.equal((await git(fixture.repository, "status", "--porcelain")).stdout, "");
+  });
+
+  it("refuses to emit Git evidence when the status snapshot never stabilizes", async () => {
+    const fixture = await makeRepository();
+    let worktreePath = "";
+    let mutation = 0;
+    const manager = new GitWorktreeWorkspaceManager({
+      beforeEvidenceStabilityCheck: async () => {
+        mutation += 1;
+        await NodeFSP.writeFile(
+          NodePath.join(worktreePath, `concurrent-${mutation}.txt`),
+          "change\n",
+        );
+      },
+    });
+    const value = await plan(manager, fixture);
+    const allocated = await manager.allocate(value);
+    worktreePath = allocated.canonicalWorktreePath;
+    await NodeAssert.rejects(
+      () => manager.captureGitEvidence(inspectionInput(value, allocated)),
+      /changed repeatedly/u,
+    );
+  });
+
+  it("rejects ownership-marker changes during Git evidence collection", async () => {
+    const fixture = await makeRepository();
+    let markerPath = "";
+    const manager = new GitWorktreeWorkspaceManager({
+      beforeEvidenceStabilityCheck: async () => {
+        await NodeFSP.writeFile(markerPath, "{}\n", "utf8");
+      },
+    });
+    const value = await plan(manager, fixture);
+    const allocated = await manager.allocate(value);
+    markerPath = allocated.ownershipMarkerPath;
+    await NodeAssert.rejects(
+      () => manager.captureGitEvidence(inspectionInput(value, allocated)),
+      (cause) => cause instanceof WorkspaceManagerError && cause.code === "ownership_mismatch",
+    );
+  });
+
+  it("rejects truncated porcelain status instead of enforcing policy on partial paths", async () => {
+    const fixture = await makeRepository();
+    const manager = new GitWorktreeWorkspaceManager();
+    const value = await plan(manager, fixture);
+    const allocated = await manager.allocate(value);
+    for (let index = 0; index < 1_600; index += 1) {
+      const name = `${String(index).padStart(4, "0")}-${"x".repeat(80)}.txt`;
+      await NodeFSP.writeFile(NodePath.join(allocated.canonicalWorktreePath, name), "change\n");
+    }
+    await NodeAssert.rejects(
+      () => manager.captureGitEvidence(inspectionInput(value, allocated)),
+      /exceeded the collection limit/u,
+    );
   });
 
   it("publishes ownership evidence atomically after an interrupted marker finalization", async () => {

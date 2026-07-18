@@ -85,12 +85,20 @@ describe("factory control plane", () => {
           workflowType: "feature",
           requestedBy: "operator",
           validationCheckId: "lint",
+          builder: {
+            objective: "Implement the bounded change",
+            acceptanceCriteria: ["Declared check passes"],
+            allowedPaths: ["src/**"],
+            runtime: { kind: "codex", maximumRuntimeSeconds: 300 },
+          },
         }),
       ).pipe(Effect.provideService(ProjectRegistry.ProjectRegistry, registry));
 
       NodeAssert.deepEqual(calls, ["read", "validate", "create"]);
       NodeAssert.equal(forwarded?.projectSnapshot.contentDigest, "fresh-digest");
       NodeAssert.equal(forwarded?.validationCheckId, "lint");
+      NodeAssert.equal(forwarded?.builder?.runtime.kind, "codex");
+      NodeAssert.deepEqual(forwarded?.builder?.allowedPaths, ["src/**"]);
       NodeAssert.equal(result._tag, "Failure");
       if (result._tag !== "Failure") {
         NodeAssert.fail("Expected workflow creation to fail.");

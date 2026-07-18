@@ -15,6 +15,7 @@ export interface ProcessStartInput {
   readonly args: ReadonlyArray<string>;
   readonly workingDirectory: string;
   readonly environment: Readonly<Record<string, string>>;
+  readonly stdin?: string;
 }
 
 export interface HostedProcess {
@@ -41,7 +42,7 @@ export interface ProcessHost {
 
 interface LocalProcessRecord {
   readonly child: NodeChildProcess.ChildProcessByStdio<
-    null,
+    NodeStream.Writable,
     NodeStream.Readable,
     NodeStream.Readable
   >;
@@ -79,7 +80,7 @@ export class LocalProcessHost implements ProcessHost {
         env: { ...input.environment },
         shell: false,
         detached: NodeProcess.platform === "linux",
-        stdio: ["ignore", "pipe", "pipe"],
+        stdio: ["pipe", "pipe", "pipe"],
         windowsHide: true,
       });
       const completion = new Promise<ProcessExit>((resolve) => {
@@ -104,6 +105,19 @@ export class LocalProcessHost implements ProcessHost {
           this.#processes.delete(executionId);
         }
       });
+      // Return the readable streams without waiting for stdin to flush. A child may apply
+      // output backpressure before it finishes reading stdin; awaiting the write here would
+      // prevent the caller from draining that output.
+      child.stdin.on("error", () => {
+        signalChild(record, "SIGKILL");
+      });
+      try {
+        child.stdin.end(input.stdin);
+      } catch (cause) {
+        signalChild(record, "SIGKILL");
+        await completion;
+        throw cause;
+      }
       return {
         executionId,
         ...(child.pid === undefined ? {} : { nativePid: child.pid }),

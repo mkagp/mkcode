@@ -126,6 +126,60 @@ describe("DeterministicCommandRunner", () => {
     await process.completion;
   });
 
+  it("contains a late stdin EPIPE when a child exits immediately", async () => {
+    const root = await temporaryRoot();
+    const host = new LocalProcessHost();
+    const process = await host.start({
+      executionId: "closed-stdin",
+      executable: NodeProcess.execPath,
+      args: ["-e", "process.exit(0)"],
+      workingDirectory: root,
+      environment: { PATH: NodeProcess.env.PATH ?? "" },
+      stdin: "x".repeat(1_048_576),
+    });
+    await process.completion;
+    await expect(host.status("closed-stdin")).resolves.toEqual({ state: "unknown" });
+  });
+
+  it("returns output streams before a backpressured child finishes reading stdin", async () => {
+    const root = await temporaryRoot();
+    const host = new LocalProcessHost();
+    const process = await host.start({
+      executionId: "stdin-output-backpressure",
+      executable: NodeProcess.execPath,
+      args: [
+        "-e",
+        `
+const output = Buffer.alloc(2 * 1024 * 1024, "x");
+const readInput = () => {
+  let bytes = 0;
+  process.stdin.on("data", (chunk) => { bytes += chunk.length; });
+  process.stdin.on("end", () => process.stderr.write(String(bytes)));
+  process.stdin.resume();
+};
+if (!process.stdout.write(output)) process.stdout.once("drain", readInput);
+else readInput();
+`,
+      ],
+      workingDirectory: root,
+      environment: { PATH: NodeProcess.env.PATH ?? "" },
+      stdin: "y".repeat(2 * 1024 * 1024),
+    });
+    let stdoutBytes = 0;
+    let stderr = "";
+    await Promise.all([
+      (async () => {
+        for await (const chunk of process.stdout) stdoutBytes += Buffer.byteLength(chunk);
+      })(),
+      (async () => {
+        for await (const chunk of process.stderr) stderr += Buffer.from(chunk).toString("utf8");
+      })(),
+      process.completion,
+    ]);
+    expect(stdoutBytes).toBe(2 * 1024 * 1024);
+    expect(stderr).toBe(String(2 * 1024 * 1024));
+  });
+
   it("pages persisted output only on UTF-8 character boundaries", async () => {
     const root = await temporaryRoot();
     const store = new CommandOutputStore({ stateRoot: NodePath.join(root, "state") });

@@ -90,7 +90,7 @@ describe("WorkflowEngine persistence", () => {
     }
   });
 
-  it("transactionally migrates an existing schema-1 database through workspace migration 3", async () => {
+  it("transactionally migrates an existing schema-1 database through agent-run migration 4", async () => {
     const root = await makeRoot();
     const stateDirectory = NodePath.join(root, "factory-state");
     const databasePath = NodePath.join(stateDirectory, "factory.sqlite");
@@ -111,14 +111,14 @@ describe("WorkflowEngine persistence", () => {
       await NodeFS.chmod(databasePath, 0o600);
 
       engine = await WorkflowEngine.open({ stateDirectory });
-      NodeAssert.equal(engine.schemaVersion, 3);
+      NodeAssert.equal(engine.schemaVersion, 4);
       engine.close();
       engine = undefined;
       inspected = new NodeSqlite.DatabaseSync(databasePath);
       NodeAssert.equal(
         (inspected.prepare("PRAGMA user_version").get() as { readonly user_version: number })
           .user_version,
-        3,
+        4,
       );
       NodeAssert.equal(
         (
@@ -140,11 +140,21 @@ describe("WorkflowEngine persistence", () => {
         ).count,
         1,
       );
+      NodeAssert.equal(
+        (
+          inspected
+            .prepare(
+              "SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = 'agent_runs'",
+            )
+            .get() as { readonly count: number }
+        ).count,
+        1,
+      );
       inspected.close();
       inspected = undefined;
 
       reopened = await WorkflowEngine.open({ stateDirectory });
-      NodeAssert.equal(reopened.schemaVersion, 3);
+      NodeAssert.equal(reopened.schemaVersion, 4);
       reopened.close();
       reopened = undefined;
     } finally {

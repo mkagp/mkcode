@@ -1,8 +1,9 @@
 # Open questions
 
-Defaults below allow the implemented configuration, factory worker, and
-deterministic command foundation to stand without guessing at agent behavior.
-“Blocks next phase” now refers to the bounded worktree-lifecycle slice.
+Defaults below allow the implemented configuration, factory worker,
+deterministic command/worktree foundation, and first Codex single-builder to
+stand without guessing at generalized agent behavior. “Blocks next phase” now
+refers to the capped same-session repair slice.
 
 ## Product
 
@@ -105,15 +106,26 @@ deterministic command foundation to stand without guessing at agent behavior.
 
 ## Runtime adapters
 
-### Which existing runtime should bridge the first workflow?
+### Which existing runtime bridged the first workflow? — resolved
 
 - **Why it matters:** the first adapter tests whether the narrow runtime contract
   is sufficient.
-- **Recommended default:** Codex, because typed app-server bindings and current
-  adapter/session behavior already exist; use the operator's strongest
-  authenticated runtime if operational constraints differ.
-- **Cost of delay:** blocks the vertical workflow, not the worker skeleton.
+- **Implemented decision:** Codex CLI `exec --json`, behind `AgentRuntime`,
+  because it exposes a native session receipt, JSONL events, output schema,
+  sandbox/model controls, and future resume without interactive thread state.
+- **Cost of delay:** none; additional adapters remain independently deferred.
 - **Blocks next phase:** No.
+
+### What exact Codex continuation contract is safe for one repair attempt?
+
+- **Why it matters:** Phase 7 must return deterministic failure evidence to the
+  same native session without creating a duplicate or allowing arbitrary prompts.
+- **Recommended default:** add one controller-generated, versioned repair
+  envelope referencing the failed CommandRun and native session; cap at one
+  attempt and route any resume ambiguity to operator attention.
+- **Cost of delay:** deterministic failures remain terminal/manual, which is
+  safe but prevents the first useful repair loop.
+- **Blocks next phase:** Yes.
 
 ### Should Pi be integrated through ACP or a dedicated adapter?
 

@@ -17,6 +17,7 @@
     "test": "vp test run"
   },
   "dependencies": {
+    "@mkcode/agent-runtime": "workspace:*",
     "@mkcode/command-runner": "workspace:*",
     "@mkcode/factory-contracts": "workspace:*",
     "@mkcode/project-config": "workspace:*",
