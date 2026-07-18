@@ -230,6 +230,7 @@ const closeWildcardStates = (
   while (pending.length > 0) {
     const position = pending.pop()!;
     const token = tokens[position];
+    const previousToken = tokens[position - 1];
     const nextToken = tokens[position + 1];
     if (
       token &&
@@ -241,6 +242,7 @@ const closeWildcardStates = (
     }
     if (
       token?.kind === "recursive_wildcard" &&
+      (position === 0 || (previousToken?.kind === "literal" && previousToken.value === "/")) &&
       nextToken?.kind === "literal" &&
       nextToken.value === "/" &&
       !states.has(position + 2)

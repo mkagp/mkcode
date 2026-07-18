@@ -156,6 +156,14 @@ export function createFactoryApiServer(input: {
   readonly agentOutputStore?: CommandOutputStore;
   readonly onWorkflowCancelled?: (workflowRunId: string) => void | Promise<void>;
 }): NodeHttp.Server {
+  const notifyWorkflowCancelled = async (workflowRunId: string): Promise<void> => {
+    try {
+      await input.onWorkflowCancelled?.(workflowRunId);
+    } catch {
+      // Durable cancellation already succeeded. The callback owns persistence of any
+      // runtime-cancellation failure and must not turn that state transition into HTTP 500.
+    }
+  };
   return NodeHttp.createServer((request, response) => {
     void (async () => {
       const credential = bearerCredential(request);
@@ -201,9 +209,9 @@ export function createFactoryApiServer(input: {
       if (method === "POST" && cancelMatch?.[1]) {
         const body = decodeRequest(decodeCancel, await readJsonBody(request));
         const runId = decodeIdentifier(cancelMatch[1]);
-        const detail = input.engine.cancelWorkflow(runId, body);
-        await input.onWorkflowCancelled?.(runId);
-        json(response, 200, detail);
+        input.engine.cancelWorkflow(runId, body);
+        await notifyWorkflowCancelled(runId);
+        json(response, 200, input.engine.readWorkflow(runId));
         return;
       }
 
@@ -288,9 +296,9 @@ export function createFactoryApiServer(input: {
       if (method === "POST" && commandCancelMatch?.[1]) {
         const body = decodeRequest(decodeCancel, await readJsonBody(request));
         const command = input.engine.readCommand(decodeIdentifier(commandCancelMatch[1]));
-        const detail = input.engine.cancelWorkflow(command.workflowRunId, body);
-        await input.onWorkflowCancelled?.(command.workflowRunId);
-        json(response, 200, detail);
+        input.engine.cancelWorkflow(command.workflowRunId, body);
+        await notifyWorkflowCancelled(command.workflowRunId);
+        json(response, 200, input.engine.readWorkflow(command.workflowRunId));
         return;
       }
 
@@ -345,9 +353,9 @@ export function createFactoryApiServer(input: {
       if (method === "POST" && agentCancelMatch?.[1]) {
         const body = decodeRequest(decodeCancel, await readJsonBody(request));
         const agent = input.engine.readAgentRun(decodeIdentifier(agentCancelMatch[1]));
-        const detail = input.engine.cancelWorkflow(agent.workflowRunId, body);
-        await input.onWorkflowCancelled?.(agent.workflowRunId);
-        json(response, 200, detail);
+        input.engine.cancelWorkflow(agent.workflowRunId, body);
+        await notifyWorkflowCancelled(agent.workflowRunId);
+        json(response, 200, input.engine.readWorkflow(agent.workflowRunId));
         return;
       }
 

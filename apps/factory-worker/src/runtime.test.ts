@@ -18,7 +18,9 @@ import type {
   WorkflowDetail,
 } from "@mkcode/factory-contracts";
 import { GitWorktreeWorkspaceManager } from "@mkcode/workspace-manager";
+import { WorkflowEngine } from "@mkcode/workflow-engine";
 
+import { createFactoryApiServer } from "./api.ts";
 import { configFromEnvironment, resolveFactoryWorkerConfig } from "./config.ts";
 import { startFactoryWorker, type RunningFactoryWorker } from "./runtime.ts";
 
@@ -218,6 +220,46 @@ const waitForLiveOutput = async (
 };
 
 describe("factory worker API", () => {
+  it("returns durable cancellation when runtime notification fails", async () => {
+    const root = await makeRoot();
+    const engine = await WorkflowEngine.open({ stateDirectory: NodePath.join(root, "state") });
+    const created = engine.createWorkflow(makeRequest(root, "cancel-callback-failure"));
+    const server = createFactoryApiServer({
+      engine,
+      credential,
+      workerInstanceId: "callback-failure-worker",
+      onWorkflowCancelled: () => Promise.reject(new Error("runtime cancellation failed")),
+    });
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(0, "127.0.0.1", resolve);
+    });
+    try {
+      const address = server.address();
+      if (!address || typeof address === "string") throw new Error("Test listener is unavailable.");
+      const response = await fetch(
+        `http://127.0.0.1:${address.port}/v1/workflows/${created.workflowRun.id}/cancel`,
+        {
+          method: "POST",
+          headers: {
+            authorization: `Bearer ${credential}`,
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({ requestedBy: "operator" }),
+        },
+      );
+      NodeAssert.equal(response.status, 200);
+      const detail = (await response.json()) as WorkflowDetail;
+      NodeAssert.equal(detail.workflowRun.status, "cancelled");
+    } finally {
+      await new Promise<void>((resolve, reject) =>
+        server.close((cause) => (cause ? reject(cause) : resolve())),
+      );
+      engine.close();
+      await NodeFSP.rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("runs independently, authenticates every endpoint, survives restart, and replays events", async () => {
     const root = await makeRoot();
     const stateDirectory = NodePath.join(root, "state");

@@ -100,6 +100,7 @@ describe("builder task envelope", () => {
     NodeAssert.equal(scopePatternMatches("src/__DOUBLE_STAR__", "src/x"), false);
     NodeAssert.equal(scopePatternMatches("**/status.*", "src/nested/status.ts"), true);
     NodeAssert.equal(scopePatternMatches("**/*.ts", "index.ts"), true);
+    NodeAssert.equal(scopePatternMatches("src**/*.ts", "srcfoo.ts"), false);
   });
 
   it("composes explicit prompt layers without runtime credentials", () => {
