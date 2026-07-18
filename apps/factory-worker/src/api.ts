@@ -154,7 +154,7 @@ export function createFactoryApiServer(input: {
   readonly workerInstanceId: string;
   readonly outputStore?: CommandOutputStore;
   readonly agentOutputStore?: CommandOutputStore;
-  readonly onWorkflowCancelled?: (workflowRunId: string) => void;
+  readonly onWorkflowCancelled?: (workflowRunId: string) => void | Promise<void>;
 }): NodeHttp.Server {
   return NodeHttp.createServer((request, response) => {
     void (async () => {
@@ -202,7 +202,7 @@ export function createFactoryApiServer(input: {
         const body = decodeRequest(decodeCancel, await readJsonBody(request));
         const runId = decodeIdentifier(cancelMatch[1]);
         const detail = input.engine.cancelWorkflow(runId, body);
-        input.onWorkflowCancelled?.(runId);
+        await input.onWorkflowCancelled?.(runId);
         json(response, 200, detail);
         return;
       }
@@ -289,7 +289,7 @@ export function createFactoryApiServer(input: {
         const body = decodeRequest(decodeCancel, await readJsonBody(request));
         const command = input.engine.readCommand(decodeIdentifier(commandCancelMatch[1]));
         const detail = input.engine.cancelWorkflow(command.workflowRunId, body);
-        input.onWorkflowCancelled?.(command.workflowRunId);
+        await input.onWorkflowCancelled?.(command.workflowRunId);
         json(response, 200, detail);
         return;
       }
@@ -346,7 +346,7 @@ export function createFactoryApiServer(input: {
         const body = decodeRequest(decodeCancel, await readJsonBody(request));
         const agent = input.engine.readAgentRun(decodeIdentifier(agentCancelMatch[1]));
         const detail = input.engine.cancelWorkflow(agent.workflowRunId, body);
-        input.onWorkflowCancelled?.(agent.workflowRunId);
+        await input.onWorkflowCancelled?.(agent.workflowRunId);
         json(response, 200, detail);
         return;
       }

@@ -1083,7 +1083,7 @@ export class GitWorktreeWorkspaceManager implements WorkspaceManager {
       }
       const root = inspection.canonicalPath;
       const snapshot = async () => {
-        const [head, branch, status, localConfiguration] = await Promise.all([
+        const [head, branch, status, localConfiguration, marker] = await Promise.all([
           runGit(["-C", root, "rev-parse", "HEAD"]),
           runGit(["-C", root, "symbolic-ref", "--quiet", "--short", "HEAD"]),
           runGit([
@@ -1096,7 +1096,18 @@ export class GitWorktreeWorkspaceManager implements WorkspaceManager {
             "--no-renames",
           ]),
           runGit(["-C", root, "config", "--local", "--null", "--list"]),
+          readMarker(inspection.ownershipMarkerPath!),
         ]);
+        if (
+          !marker ||
+          marker.digest !== input.ownershipMarkerDigest ||
+          !markerMatchesInspection(marker.marker, input)
+        ) {
+          throw new WorkspaceManagerError(
+            "ownership_mismatch",
+            "Workspace ownership changed during Git evidence collection.",
+          );
+        }
         return {
           head: head.stdout.trim(),
           headTruncated: head.stdoutTruncated,
@@ -1106,6 +1117,7 @@ export class GitWorktreeWorkspaceManager implements WorkspaceManager {
           statusTruncated: status.stdoutTruncated,
           localConfiguration: localConfiguration.stdout,
           localConfigurationTruncated: localConfiguration.stdoutTruncated,
+          ownershipMarkerDigest: marker.digest,
         };
       };
       const before = await snapshot();
@@ -1131,6 +1143,7 @@ export class GitWorktreeWorkspaceManager implements WorkspaceManager {
         before.branch !== after.branch ||
         before.status !== after.status ||
         before.localConfiguration !== after.localConfiguration ||
+        before.ownershipMarkerDigest !== after.ownershipMarkerDigest ||
         after.head !== inspection.observedHead ||
         after.branch !== inspection.observedBranch
       ) {
@@ -1165,7 +1178,7 @@ export class GitWorktreeWorkspaceManager implements WorkspaceManager {
         localConfigurationDigest: NodeCrypto.createHash("sha256")
           .update(after.localConfiguration)
           .digest("hex"),
-        ownershipMarkerDigest: input.ownershipMarkerDigest,
+        ownershipMarkerDigest: after.ownershipMarkerDigest,
       };
     }
     throw new WorkspaceManagerError(

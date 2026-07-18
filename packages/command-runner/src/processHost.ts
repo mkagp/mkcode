@@ -98,6 +98,9 @@ export class LocalProcessHost implements ProcessHost {
         child.once("spawn", onSpawn);
         child.once("error", onError);
       });
+      // A child may close stdin immediately after spawn. Keep a late EPIPE from becoming
+      // an unhandled stream error; process completion remains the durable runtime result.
+      child.stdin.on("error", () => undefined);
       child.stdin.end(input.stdin);
       const record = { child, completion };
       this.#processes.set(executionId, record);

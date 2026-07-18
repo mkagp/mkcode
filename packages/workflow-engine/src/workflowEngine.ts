@@ -211,6 +211,7 @@ const terminalAgentStatuses = new Set([
   "failed",
   "timed_out",
   "operator_attention",
+  "blocked",
 ]);
 const durablyCompletedAgentStatuses = new Set([...terminalAgentStatuses, "blocked"]);
 
@@ -1810,15 +1811,32 @@ export class WorkflowEngine {
 
   markAgentRunning(input: {
     readonly agentRunId: string;
+    readonly jobId: string;
+    readonly leaseOwner: string;
+    readonly expectedStageVersion: number;
     readonly expectedVersion: number;
     readonly evidence: AgentStartedEvidence;
   }): AgentRun {
     return this.#transaction(() => {
       const agent = this.#findAgentRun(input.agentRunId);
+      const job = this.#findJob(input.jobId);
+      const stage = this.#findStage(agent.stageRunId);
+      const run = this.#findWorkflowRun(agent.workflowRunId);
+      const now = this.#now();
       if (
         agent.status !== "starting" ||
         agent.version !== input.expectedVersion ||
-        agent.processHostExecutionId !== input.evidence.processHostExecutionId
+        agent.processHostExecutionId !== input.evidence.processHostExecutionId ||
+        job.jobType !== "agent.execute" ||
+        job.status !== "claimed" ||
+        job.leaseOwner !== input.leaseOwner ||
+        job.leaseExpiration === undefined ||
+        job.leaseExpiration <= now ||
+        job.stageRunId !== agent.stageRunId ||
+        job.workflowRunId !== agent.workflowRunId ||
+        stage.version !== input.expectedStageVersion ||
+        run.status !== "building" ||
+        run.cancellationRequestedAt !== undefined
       ) {
         throw new WorkflowEngineError("stale_version", "Agent launch confirmation lost its fence.");
       }
@@ -2053,7 +2071,7 @@ export class WorkflowEngine {
            WHERE stage_run_id = ? AND attempt_number = ?`,
         )
         .run(
-          status === "completed" ? "completed" : "failed",
+          cancelled ? "cancelled" : status === "completed" ? "completed" : "failed",
           now,
           failureClassification,
           stage.id,

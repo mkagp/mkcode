@@ -126,6 +126,20 @@ describe("DeterministicCommandRunner", () => {
     await process.completion;
   });
 
+  it("contains a late stdin EPIPE when a child exits immediately", async () => {
+    const root = await temporaryRoot();
+    const host = new LocalProcessHost();
+    const process = await host.start({
+      executionId: "closed-stdin",
+      executable: NodeProcess.execPath,
+      args: ["-e", "process.exit(0)"],
+      workingDirectory: root,
+      environment: { PATH: NodeProcess.env.PATH ?? "" },
+      stdin: "x".repeat(1_048_576),
+    });
+    await expect(process.completion).resolves.toMatchObject({ exitCode: 0 });
+  });
+
   it("pages persisted output only on UTF-8 character boundaries", async () => {
     const root = await temporaryRoot();
     const store = new CommandOutputStore({ stateRoot: NodePath.join(root, "state") });

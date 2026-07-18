@@ -269,6 +269,33 @@ describe("AgentExecutionWorker", () => {
     engine.close();
   });
 
+  it("renews the job lease while runtime startup is still in progress", async () => {
+    const root = await makeRoot();
+    const { engine, created, worktree } = await createAllocated(root);
+    let calls = 0;
+    const manager = {
+      captureGitEvidence: () =>
+        Promise.resolve(evidence(worktree, calls++ === 0 ? [] : ["src/result.txt"])),
+    } as unknown as WorkspaceManager;
+    const runtime = new FakeRuntime(worktree);
+    const originalStart = runtime.start.bind(runtime);
+    runtime.start = async (input) => {
+      await NodeTimersPromises.setTimeout(250);
+      return originalStart(input);
+    };
+    const worker = new AgentExecutionWorker({
+      engine,
+      runtime,
+      workspaceManager: manager,
+      workerInstanceId: "worker",
+      leaseMilliseconds: 100,
+      redactionValues: [],
+    });
+    await worker.runClaimed(engine.claimNextJob("worker", 100)!);
+    NodeAssert.equal(engine.readWorkflow(created.workflowRun.id).workflowRun.status, "validating");
+    engine.close();
+  });
+
   it("does not schedule validation when post-run evidence reports a forbidden path", async () => {
     const root = await makeRoot();
     const { engine, created, worktree } = await createAllocated(root);
@@ -320,6 +347,11 @@ describe("AgentExecutionWorker", () => {
     NodeAssert.equal(detail.agentRuns[0]?.status, "cancelled");
     NodeAssert.equal(detail.commands.length, 0);
     NodeAssert.equal(detail.workspaces[0]?.status, "retained");
+    const building = detail.stages.find((stage) => stage.stageKey === "building");
+    NodeAssert.equal(
+      detail.attempts.find((attempt) => attempt.stageRunId === building?.id)?.status,
+      "cancelled",
+    );
     engine.close();
   });
 
@@ -347,6 +379,54 @@ describe("AgentExecutionWorker", () => {
     NodeAssert.equal(detail.workflowRun.status, "cancelled");
     NodeAssert.equal(detail.agentRuns[0]?.status, "cancelled");
     NodeAssert.equal(detail.commands.length, 0);
+    const building = detail.stages.find((stage) => stage.stageKey === "building");
+    NodeAssert.equal(
+      detail.attempts.find((attempt) => attempt.stageRunId === building?.id)?.status,
+      "cancelled",
+    );
+    engine.close();
+  });
+
+  it("surfaces runtime cancellation failures as operator attention", async () => {
+    const root = await makeRoot();
+    const { engine, created, worktree } = await createAllocated(root);
+    let calls = 0;
+    const manager = {
+      captureGitEvidence: () =>
+        Promise.resolve(evidence(worktree, calls++ === 0 ? [] : ["src/result.txt"])),
+    } as unknown as WorkspaceManager;
+    const runtime = new FakeRuntime(worktree);
+    const originalWait = runtime.wait.bind(runtime);
+    let releaseCompletion!: () => void;
+    const completionGate = new Promise<void>((resolve) => {
+      releaseCompletion = resolve;
+    });
+    runtime.wait = async () => {
+      await completionGate;
+      return originalWait();
+    };
+    runtime.cancel = () => Promise.reject(new Error("cancel failed"));
+    const worker = new AgentExecutionWorker({
+      engine,
+      runtime,
+      workspaceManager: manager,
+      workerInstanceId: "worker",
+      leaseMilliseconds: 30_000,
+      redactionValues: [],
+    });
+    const running = worker.runClaimed(engine.claimNextJob("worker")!);
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      if (engine.listAgentRunsForReconciliation()[0]?.status === "running") break;
+      await NodeTimersPromises.setImmediate();
+    }
+    engine.cancelWorkflow(created.workflowRun.id, { requestedBy: "operator" });
+    await NodeAssert.rejects(() => worker.cancelWorkflow(created.workflowRun.id), /cancel failed/u);
+    NodeAssert.equal(
+      engine.readWorkflow(created.workflowRun.id).agentRuns[0]?.status,
+      "operator_attention",
+    );
+    releaseCompletion();
+    await running;
     engine.close();
   });
 

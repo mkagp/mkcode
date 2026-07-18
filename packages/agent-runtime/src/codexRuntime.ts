@@ -251,6 +251,31 @@ const isRuntimeCompletion = (value: unknown): value is AgentRuntimeCompletion =>
   );
 };
 
+const isRuntimeEvent = (value: unknown): value is AgentRuntimeEvent => {
+  const event = asObject(value);
+  const metadata = asObject(event?.metadata);
+  return (
+    event !== undefined &&
+    Number.isSafeInteger(event.cursor) &&
+    Number(event.cursor) > 0 &&
+    typeof event.type === "string" &&
+    typeof event.timestamp === "string" &&
+    metadata !== undefined &&
+    Object.values(metadata).every((item) => ["string", "number", "boolean"].includes(typeof item))
+  );
+};
+
+const isRuntimeEventPage = (value: unknown): value is AgentRuntimeEventPage => {
+  const page = asObject(value);
+  return (
+    page !== undefined &&
+    Array.isArray(page.events) &&
+    page.events.every(isRuntimeEvent) &&
+    Number.isSafeInteger(page.nextCursor) &&
+    Number(page.nextCursor) >= 0
+  );
+};
+
 const normalizedEvent = (event: Record<string, unknown>): Record<string, unknown> => {
   const type = typeof event.type === "string" ? event.type : "runtime.unknown";
   if (type === "item.completed") {
@@ -422,7 +447,7 @@ export class CodexAgentRuntime implements AgentRuntime {
     const startedAt = nowIso();
     const timeoutDeadline = new Date(Date.now() + task.maximumRuntimeSeconds * 1_000).toISOString();
     const active: ActiveRecord = {
-      input,
+      input: { ...input, workingDirectory },
       hosted,
       startedAt,
       timeoutDeadline,
@@ -529,7 +554,10 @@ export class CodexAgentRuntime implements AgentRuntime {
         "Agent runtime session is unavailable.",
       );
     }
-    const events = active?.events.filter((event) => event.cursor > cursor) ?? [];
+    const persistedEvents = active ? undefined : await this.#readEvents(session.executionId);
+    const events = (active?.events ?? persistedEvents?.events ?? []).filter(
+      (event) => event.cursor > cursor,
+    );
     return { events, nextCursor: events.at(-1)?.cursor ?? cursor };
   }
 
@@ -603,8 +631,12 @@ export class CodexAgentRuntime implements AgentRuntime {
       stdout,
       stderr,
     };
-    await this.#writeCompletion(record.input.executionId, completion);
     this.#appendEvent(record, `agent.${outcome}`, { exitCode: exit.exitCode ?? -1 });
+    await this.#writeEvents(record.input.executionId, {
+      events: record.events,
+      nextCursor: record.eventCursor,
+    });
+    await this.#writeCompletion(record.input.executionId, completion);
     if (this.#active.get(record.input.executionId) === record) {
       this.#active.delete(record.input.executionId);
       delete record.finalMessage;
@@ -719,6 +751,13 @@ export class CodexAgentRuntime implements AgentRuntime {
     return NodePath.join(this.#controlRoot, executionId, "completion.json");
   }
 
+  #eventsPath(executionId: string): string {
+    if (!SAFE_EXECUTION_ID.test(executionId)) {
+      throw new AgentRuntimeError("invalid_configuration", "Agent execution ID is unsafe.");
+    }
+    return NodePath.join(this.#controlRoot, executionId, "events.json");
+  }
+
   async #writeCompletion(executionId: string, completion: AgentRuntimeCompletion): Promise<void> {
     const path = this.#completionPath(executionId);
     await writePrivateJson(path, completion);
@@ -729,6 +768,19 @@ export class CodexAgentRuntime implements AgentRuntime {
       const path = this.#completionPath(executionId);
       const value = await readPrivateJson(path);
       return isRuntimeCompletion(value) ? value : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  async #writeEvents(executionId: string, events: AgentRuntimeEventPage): Promise<void> {
+    await writePrivateJson(this.#eventsPath(executionId), events);
+  }
+
+  async #readEvents(executionId: string): Promise<AgentRuntimeEventPage | undefined> {
+    try {
+      const value = await readPrivateJson(this.#eventsPath(executionId));
+      return isRuntimeEventPage(value) ? value : undefined;
     } catch {
       return undefined;
     }

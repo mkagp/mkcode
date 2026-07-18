@@ -92,6 +92,7 @@ console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 1 } 
     });
     const started = await runtime.start(startInput(root));
     const completion = await runtime.wait(started.session);
+    const completedEvents = await runtime.events(started.session);
 
     NodeAssert.equal(started.session.nativeSessionId, "thread-1");
     NodeAssert.equal(completion.outcome, "completed");
@@ -106,10 +107,12 @@ console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 1 } 
     NodeAssert.doesNotMatch(stderr.data, /secret-marker/u);
     NodeAssert.doesNotMatch(stdout.data, /implemented secret-marker/u);
     NodeAssert.match(stderr.data, /\[REDACTED\]/u);
+    NodeAssert.equal(completedEvents.events.at(-1)?.type, "agent.completed");
 
     const restarted = new CodexAgentRuntime({ stateRoot: NodePath.join(root, "state") });
     const recovered = await restarted.reconcile(started.session);
     NodeAssert.equal(recovered.state, "completed");
+    NodeAssert.deepEqual(await restarted.events(started.session), completedEvents);
     await NodeAssert.rejects(
       () =>
         restarted.result({
@@ -118,6 +121,38 @@ console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 1 } 
         }),
       (cause) => cause instanceof AgentRuntimeError && cause.code === "runtime_session_not_found",
     );
+  });
+
+  it("uses the canonical working directory for subsequent session operations", async () => {
+    const root = await makeRoot();
+    const executable = await makeExecutable(
+      root,
+      `
+const result = {
+  status: "completed",
+  summary: "done",
+  claimedChangedPaths: [],
+  claimedTestsChanged: [],
+  unresolvedIssues: [],
+  questionsOrBlockers: []
+};
+console.log(JSON.stringify({ type: "thread.started", thread_id: "thread-canonical" }));
+console.log(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: JSON.stringify(result) } }));
+console.log(JSON.stringify({ type: "turn.completed" }));
+`,
+    );
+    const runtime = new CodexAgentRuntime({
+      stateRoot: NodePath.join(root, "state"),
+      executable,
+      environment: { PATH: process.env.PATH, HOME: process.env.HOME },
+    });
+    const input = startInput(root);
+    const started = await runtime.start({
+      ...input,
+      workingDirectory: NodePath.join(root, "worktree", "..", "worktree"),
+    });
+    NodeAssert.equal(started.session.workingDirectory, NodePath.join(root, "worktree"));
+    NodeAssert.equal((await runtime.wait(started.session)).outcome, "completed");
   });
 
   it("rejects unavailable binaries and invalid model configuration", async () => {

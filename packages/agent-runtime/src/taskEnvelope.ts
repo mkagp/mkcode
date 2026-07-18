@@ -53,20 +53,6 @@ const normalizeScopePath = (value: string): string => {
   return normalized;
 };
 
-const patternPrefix = (pattern: string): string =>
-  pattern.replace(/\*.*$/u, "").replace(/\/$/u, "");
-
-const patternsOverlap = (left: string, right: string): boolean => {
-  const leftPrefix = patternPrefix(left);
-  const rightPrefix = patternPrefix(right);
-  return (
-    left === right ||
-    leftPrefix === rightPrefix ||
-    leftPrefix.startsWith(`${rightPrefix}/`) ||
-    rightPrefix.startsWith(`${leftPrefix}/`)
-  );
-};
-
 const invalidShape = (): never => {
   throw new AgentRuntimeError("invalid_configuration", "Builder task envelope shape is invalid.");
 };
@@ -244,6 +230,7 @@ const closeWildcardStates = (
   while (pending.length > 0) {
     const position = pending.pop()!;
     const token = tokens[position];
+    const nextToken = tokens[position + 1];
     if (
       token &&
       (token.kind === "segment_wildcard" || token.kind === "recursive_wildcard") &&
@@ -252,8 +239,64 @@ const closeWildcardStates = (
       states.add(position + 1);
       pending.push(position + 1);
     }
+    if (
+      token?.kind === "recursive_wildcard" &&
+      nextToken?.kind === "literal" &&
+      nextToken.value === "/" &&
+      !states.has(position + 2)
+    ) {
+      states.add(position + 2);
+      pending.push(position + 2);
+    }
   }
   return states;
+};
+
+const advanceScopeStates = (
+  input: ReadonlySet<number>,
+  tokens: ReadonlyArray<ScopeToken>,
+  character: string,
+): Set<number> => {
+  const next = new Set<number>();
+  for (const position of closeWildcardStates(input, tokens)) {
+    const token = tokens[position];
+    if (!token) continue;
+    if (token.kind === "literal" && token.value === character) next.add(position + 1);
+    if (token.kind === "segment_wildcard" && character !== "/") next.add(position);
+    if (token.kind === "recursive_wildcard") next.add(position);
+  }
+  return closeWildcardStates(next, tokens);
+};
+
+const scopeStateKey = (states: ReadonlySet<number>): string =>
+  [...states].sort((a, b) => a - b).join(",");
+
+const patternsOverlap = (left: string, right: string): boolean => {
+  const leftTokens = compileScopePattern(left);
+  const rightTokens = compileScopePattern(right);
+  const alphabet = new Set<string>(["/", "\u0001"]);
+  for (const token of [...leftTokens, ...rightTokens]) {
+    if (token.kind === "literal") alphabet.add(token.value);
+  }
+  const initialLeft = closeWildcardStates(new Set([0]), leftTokens);
+  const initialRight = closeWildcardStates(new Set([0]), rightTokens);
+  const pending: Array<readonly [Set<number>, Set<number>]> = [[initialLeft, initialRight]];
+  const seen = new Set<string>();
+  while (pending.length > 0) {
+    const [leftStates, rightStates] = pending.pop()!;
+    const key = `${scopeStateKey(leftStates)}|${scopeStateKey(rightStates)}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    if (leftStates.has(leftTokens.length) && rightStates.has(rightTokens.length)) return true;
+    // Fail closed on pathological inputs even though individual pattern size is already bounded.
+    if (seen.size > 10_000) return true;
+    for (const character of alphabet) {
+      const nextLeft = advanceScopeStates(leftStates, leftTokens, character);
+      const nextRight = advanceScopeStates(rightStates, rightTokens, character);
+      if (nextLeft.size > 0 && nextRight.size > 0) pending.push([nextLeft, nextRight]);
+    }
+  }
+  return false;
 };
 
 export const scopePatternMatches = (pattern: string, path: string): boolean => {
@@ -262,15 +305,7 @@ export const scopePatternMatches = (pattern: string, path: string): boolean => {
   const tokens = compileScopePattern(normalizedPattern);
   let states = closeWildcardStates(new Set([0]), tokens);
   for (const character of normalizedPath) {
-    const next = new Set<number>();
-    for (const position of states) {
-      const token = tokens[position];
-      if (!token) continue;
-      if (token.kind === "literal" && token.value === character) next.add(position + 1);
-      if (token.kind === "segment_wildcard" && character !== "/") next.add(position);
-      if (token.kind === "recursive_wildcard") next.add(position);
-    }
-    states = closeWildcardStates(next, tokens);
+    states = advanceScopeStates(states, tokens, character);
     if (states.size === 0) return false;
   }
   return closeWildcardStates(states, tokens).has(tokens.length);

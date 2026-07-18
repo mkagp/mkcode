@@ -184,9 +184,20 @@ export class AgentExecutionWorker {
     );
   }
 
-  cancelWorkflow(workflowRunId: string): void {
+  async cancelWorkflow(workflowRunId: string): Promise<void> {
     const session = this.#active.get(workflowRunId);
-    if (session) void this.#runtime.cancel(session, "workflow_cancelled");
+    if (!session) return;
+    try {
+      await this.#runtime.cancel(session, "workflow_cancelled");
+    } catch (cause) {
+      const agent = this.#engine
+        .readWorkflow(workflowRunId)
+        .agentRuns.find((candidate) => candidate.processHostExecutionId === session.executionId);
+      if (agent) {
+        this.#engine.markAgentOperatorAttention(agent.id, "runtime_cancellation_failed");
+      }
+      throw cause;
+    }
   }
 
   async runClaimed(claimed: ClaimedJob): Promise<void> {
@@ -235,11 +246,29 @@ export class AgentExecutionWorker {
     });
     let renewal: ReturnType<typeof NodeTimers.setInterval> | undefined;
     let renewalFailed = false;
+    let startedSession: AgentSessionReference | undefined;
+    renewal = NodeTimers.setInterval(
+      () => {
+        try {
+          this.#engine.renewLease(claimed.job.id, this.#workerInstanceId, this.#leaseMilliseconds);
+        } catch {
+          renewalFailed = true;
+          if (startedSession) {
+            void this.#runtime.cancel(startedSession, "lease_lost").catch(() => undefined);
+          }
+        }
+      },
+      Math.max(50, Math.floor(this.#leaseMilliseconds / 3)),
+    );
+    renewal.unref();
     try {
       const projectContext = await loadContext(
         workspace.canonicalWorktreePath!,
         task.contextFileReferences,
       );
+      if (renewalFailed) {
+        throw new AgentRuntimeError("runtime_ambiguous", "Agent startup lost its durable lease.");
+      }
       const prompt = composeBuilderPrompt({
         task,
         projectContext,
@@ -254,7 +283,12 @@ export class AgentExecutionWorker {
         workingDirectory: workspace.canonicalWorktreePath!,
         redactionValues: this.#redactionValues,
       });
+      startedSession = started.session;
       this.#active.set(agent.workflowRunId, started.session);
+      if (renewalFailed) {
+        await this.#runtime.cancel(started.session, "lease_lost");
+        throw new AgentRuntimeError("runtime_ambiguous", "Agent startup lost its durable lease.");
+      }
       if (this.#stopping) {
         await this.#runtime.cancel(started.session, "worker_shutdown");
         return;
@@ -278,6 +312,9 @@ export class AgentExecutionWorker {
       try {
         current = this.#engine.markAgentRunning({
           agentRunId: agent.id,
+          jobId: claimed.job.id,
+          leaseOwner: this.#workerInstanceId,
+          expectedStageVersion: claimed.stageVersion,
           expectedVersion: current.version,
           evidence: {
             runtimeSessionId: started.session.nativeSessionId,
@@ -308,22 +345,6 @@ export class AgentExecutionWorker {
         );
         return;
       }
-      renewal = NodeTimers.setInterval(
-        () => {
-          try {
-            this.#engine.renewLease(
-              claimed.job.id,
-              this.#workerInstanceId,
-              this.#leaseMilliseconds,
-            );
-          } catch {
-            renewalFailed = true;
-            void this.#runtime.cancel(started.session, "lease_lost");
-          }
-        },
-        Math.max(50, Math.floor(this.#leaseMilliseconds / 3)),
-      );
-      renewal.unref();
       const completion = await this.#runtime.wait(started.session);
       if (this.#stopping || renewalFailed) return;
       await this.#persistCompletion(
@@ -338,6 +359,9 @@ export class AgentExecutionWorker {
       );
     } catch (cause) {
       if (this.#stopping) return;
+      if (startedSession) {
+        await this.#runtime.cancel(startedSession, "launch_fence_lost").catch(() => undefined);
+      }
       if (
         cause instanceof AgentRuntimeError &&
         ["runtime_unavailable", "invalid_configuration"].includes(cause.code)

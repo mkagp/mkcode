@@ -1,4 +1,5 @@
 // @effect-diagnostics nodeBuiltinImport:off
+// @effect-diagnostics globalDate:off -- Lease-fence tests control durable wall-clock time.
 import * as NodeAssert from "node:assert/strict";
 import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";
@@ -225,6 +226,9 @@ describe("durable single-builder AgentRun", () => {
       () =>
         engine.markAgentRunning({
           agentRunId: agent.id,
+          jobId: claimed.job.id,
+          leaseOwner: "worker",
+          expectedStageVersion: claimed.stageVersion,
           expectedVersion: agent.version,
           evidence: {
             runtimeSessionId: "session",
@@ -237,6 +241,9 @@ describe("durable single-builder AgentRun", () => {
     );
     const running = engine.markAgentRunning({
       agentRunId: agent.id,
+      jobId: claimed.job.id,
+      leaseOwner: "worker",
+      expectedStageVersion: claimed.stageVersion,
       expectedVersion: agent.version,
       evidence: {
         runtimeSessionId: "session",
@@ -279,6 +286,95 @@ describe("durable single-builder AgentRun", () => {
     engine.close();
   });
 
+  it("rejects launch confirmation after the agent job lease expires", async () => {
+    const root = await makeRoot();
+    let now = Date.parse("2026-07-17T00:00:00.000Z");
+    const engine = await WorkflowEngine.open({
+      stateDirectory: NodePath.join(root, "state"),
+      clock: () => new Date(now),
+    });
+    const { detail } = allocate(engine, root);
+    const claimed = engine.claimNextJob("worker", 100)!;
+    const agent = engine.startAgent({
+      agentRunId: detail.agentRuns[0]!.id,
+      jobId: claimed.job.id,
+      leaseOwner: "worker",
+      attemptId: claimed.attempt.id,
+      expectedStageVersion: claimed.stageVersion,
+      evidence: {
+        processHostExecutionId: "exec",
+        stdoutArtifactReference: "stdout",
+        stderrArtifactReference: "stderr",
+        preGitEvidence: {},
+      },
+    });
+    now += 101;
+    NodeAssert.throws(
+      () =>
+        engine.markAgentRunning({
+          agentRunId: agent.id,
+          jobId: claimed.job.id,
+          leaseOwner: "worker",
+          expectedStageVersion: claimed.stageVersion,
+          expectedVersion: agent.version,
+          evidence: {
+            runtimeSessionId: "session",
+            runtimeThreadId: "session",
+            processHostExecutionId: "exec",
+            startedAt: "2026-07-17T00:00:00.050Z",
+          },
+        }),
+      /lost its fence/u,
+    );
+    engine.close();
+  });
+
+  it("preserves a blocked AgentRun as a durable terminal result", async () => {
+    const root = await makeRoot();
+    const engine = await WorkflowEngine.open({ stateDirectory: NodePath.join(root, "state") });
+    const { detail } = allocate(engine, root);
+    const claimed = engine.claimNextJob("worker")!;
+    let agent = engine.startAgent({
+      agentRunId: detail.agentRuns[0]!.id,
+      jobId: claimed.job.id,
+      leaseOwner: "worker",
+      attemptId: claimed.attempt.id,
+      expectedStageVersion: claimed.stageVersion,
+      evidence: {
+        processHostExecutionId: "exec",
+        stdoutArtifactReference: "stdout",
+        stderrArtifactReference: "stderr",
+        preGitEvidence: {},
+      },
+    });
+    agent = engine.markAgentRunning({
+      agentRunId: agent.id,
+      jobId: claimed.job.id,
+      leaseOwner: "worker",
+      expectedStageVersion: claimed.stageVersion,
+      expectedVersion: agent.version,
+      evidence: {
+        runtimeSessionId: "session",
+        runtimeThreadId: "session",
+        processHostExecutionId: "exec",
+        startedAt: "2026-07-17T00:00:01.000Z",
+      },
+    });
+    const blocked = engine.completeAgent({
+      agentRunId: agent.id,
+      jobId: claimed.job.id,
+      leaseOwner: "worker",
+      expectedStageVersion: claimed.stageVersion,
+      evidence: { ...completion(agent.id), outcome: "blocked" as const },
+    });
+    NodeAssert.equal(blocked.agentRuns[0]?.status, "blocked");
+    NodeAssert.throws(
+      () => engine.markAgentOperatorAttention(agent.id, "late reconciliation"),
+      /terminal agent run/u,
+    );
+    engine.close();
+  });
+
   it("routes policy violations to operator attention and retains the worktree", async () => {
     const root = await makeRoot();
     const engine = await WorkflowEngine.open({ stateDirectory: NodePath.join(root, "state") });
@@ -299,6 +395,9 @@ describe("durable single-builder AgentRun", () => {
     });
     agent = engine.markAgentRunning({
       agentRunId: agent.id,
+      jobId: claimed.job.id,
+      leaseOwner: "worker",
+      expectedStageVersion: claimed.stageVersion,
       expectedVersion: agent.version,
       evidence: {
         runtimeSessionId: "session",
@@ -341,6 +440,9 @@ describe("durable single-builder AgentRun", () => {
     });
     agent = engine.markAgentRunning({
       agentRunId: agent.id,
+      jobId: claimed.job.id,
+      leaseOwner: "worker",
+      expectedStageVersion: claimed.stageVersion,
       expectedVersion: agent.version,
       evidence: {
         runtimeSessionId: "session",

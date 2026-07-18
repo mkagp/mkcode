@@ -218,6 +218,23 @@ describe("GitWorktreeWorkspaceManager", () => {
     );
   });
 
+  it("rejects ownership-marker changes during Git evidence collection", async () => {
+    const fixture = await makeRepository();
+    let markerPath = "";
+    const manager = new GitWorktreeWorkspaceManager({
+      beforeEvidenceStabilityCheck: async () => {
+        await NodeFSP.writeFile(markerPath, "{}\n", "utf8");
+      },
+    });
+    const value = await plan(manager, fixture);
+    const allocated = await manager.allocate(value);
+    markerPath = allocated.ownershipMarkerPath;
+    await NodeAssert.rejects(
+      () => manager.captureGitEvidence(inspectionInput(value, allocated)),
+      (cause) => cause instanceof WorkspaceManagerError && cause.code === "ownership_mismatch",
+    );
+  });
+
   it("rejects truncated porcelain status instead of enforcing policy on partial paths", async () => {
     const fixture = await makeRepository();
     const manager = new GitWorktreeWorkspaceManager();

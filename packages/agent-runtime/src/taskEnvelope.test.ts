@@ -82,6 +82,15 @@ describe("builder task envelope", () => {
     );
   });
 
+  it("accepts disjoint wildcard scopes that share a directory prefix", () => {
+    const result = validateBuilderTaskEnvelope(
+      task({
+        scope: { allowedPaths: ["src/*.ts"], forbiddenPaths: ["src/*.md"] },
+      }),
+    );
+    NodeAssert.deepEqual(result.scope.allowedPaths, ["src/*.ts"]);
+  });
+
   it("matches bounded glob patterns without matching sibling paths", () => {
     NodeAssert.equal(scopePatternMatches("src/**", "src/status.txt"), true);
     NodeAssert.equal(scopePatternMatches("src/*.ts", "src/status.ts"), true);
@@ -90,6 +99,7 @@ describe("builder task envelope", () => {
     NodeAssert.equal(scopePatternMatches("src/?.ts", "src/a.ts"), false);
     NodeAssert.equal(scopePatternMatches("src/__DOUBLE_STAR__", "src/x"), false);
     NodeAssert.equal(scopePatternMatches("**/status.*", "src/nested/status.ts"), true);
+    NodeAssert.equal(scopePatternMatches("**/*.ts", "index.ts"), true);
   });
 
   it("composes explicit prompt layers without runtime credentials", () => {

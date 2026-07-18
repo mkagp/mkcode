@@ -129,9 +129,9 @@ export async function startFactoryWorker(
     workerInstanceId: config.workerInstanceId,
     outputStore: commandRunner.outputStore,
     agentOutputStore: agentRuntime.outputStore,
-    onWorkflowCancelled: (workflowRunId) => {
+    onWorkflowCancelled: async (workflowRunId) => {
       commandWorker.cancelWorkflow(workflowRunId);
-      agentWorker.cancelWorkflow(workflowRunId);
+      await agentWorker.cancelWorkflow(workflowRunId);
     },
   });
 
