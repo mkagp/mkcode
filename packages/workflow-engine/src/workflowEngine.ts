@@ -8,6 +8,7 @@ import * as NodeSqlite from "node:sqlite";
 
 import {
   type Approval,
+  type AgentRun,
   type ApprovalResolveRequest,
   type Artifact,
   type Attempt,
@@ -18,6 +19,7 @@ import {
   type JobType,
   type StageKey,
   type StageRun,
+  type SingleBuilderRequest,
   type WorkflowCancelRequest,
   type WorkflowCreateRequest,
   type WorkflowCreateResult,
@@ -40,9 +42,10 @@ import { WorkflowEngineError } from "./errors.ts";
 import { migration001Sql } from "./migrations/001_initial.ts";
 import { migration002Sql } from "./migrations/002_command_runs.ts";
 import { migration003Sql } from "./migrations/003_workspaces.ts";
+import { migration004Sql } from "./migrations/004_agent_runs.ts";
 import { ensurePrivateDirectory, ensurePrivateFile, openPrivateFile } from "./statePermissions.ts";
 
-export const FACTORY_SCHEMA_VERSION = 3;
+export const FACTORY_SCHEMA_VERSION = 4;
 export const DEFAULT_LEASE_MILLISECONDS = 30_000;
 export const MAX_LEASE_MILLISECONDS = 86_400_000;
 export const DEFAULT_EVENT_PAGE_LIMIT = 100;
@@ -111,6 +114,43 @@ export interface WorkspaceInspectionEvidence {
   readonly dirty?: boolean;
 }
 
+export interface AgentStartEvidence {
+  readonly processHostExecutionId: string;
+  readonly stdoutArtifactReference: string;
+  readonly stderrArtifactReference: string;
+  readonly preGitEvidence: Readonly<Record<string, unknown>>;
+}
+
+export interface AgentStartedEvidence {
+  readonly runtimeSessionId: string;
+  readonly runtimeThreadId: string;
+  readonly processHostExecutionId: string;
+  readonly nativePid?: number;
+  readonly startedAt: string;
+}
+
+export interface AgentCompletionEvidence {
+  readonly outcome: "completed" | "failed" | "cancelled" | "timed_out" | "blocked";
+  readonly resultEnvelope: Readonly<Record<string, unknown>>;
+  readonly completionReason: string;
+  readonly stdout: {
+    readonly locationReference: string;
+    readonly digest: string;
+    readonly observedBytes: number;
+    readonly persistedBytes: number;
+    readonly truncated: boolean;
+  };
+  readonly stderr: {
+    readonly locationReference: string;
+    readonly digest: string;
+    readonly observedBytes: number;
+    readonly persistedBytes: number;
+    readonly truncated: boolean;
+  };
+  readonly postGitEvidence: Readonly<Record<string, unknown>>;
+  readonly policyViolations: ReadonlyArray<string>;
+}
+
 type SqlRow = Record<string, unknown>;
 interface WorkflowListCursor {
   readonly creationSequence: number;
@@ -165,6 +205,14 @@ const terminalCommandStatuses = new Set([
   "terminated",
   "operator_attention",
 ]);
+const terminalAgentStatuses = new Set([
+  "completed",
+  "cancelled",
+  "failed",
+  "timed_out",
+  "operator_attention",
+]);
+const durablyCompletedAgentStatuses = new Set([...terminalAgentStatuses, "blocked"]);
 
 const stageSequence: ReadonlyArray<StageKey> = [
   "planning",
@@ -178,11 +226,13 @@ const jobTypeForStage = (stage: StageKey, validationCheckId?: string): JobType =
     ? "workspace.allocate"
     : stage === "workspace_cleanup"
       ? "workspace.cleanup"
-      : stage === "validating" && validationCheckId
-        ? "command.execute"
-        : stage === "validating"
-          ? "simulation.request-human-review"
-          : "simulation.complete-stage";
+      : stage === "building"
+        ? "agent.execute"
+        : stage === "validating" && validationCheckId
+          ? "command.execute"
+          : stage === "validating"
+            ? "simulation.request-human-review"
+            : "simulation.complete-stage";
 
 export class WorkflowEngine {
   readonly stateDirectory: string;
@@ -287,6 +337,7 @@ export class WorkflowEngine {
       applyMigration(1, migration001Sql);
       applyMigration(2, migration002Sql);
       applyMigration(3, migration003Sql);
+      applyMigration(4, migration004Sql);
       await ensurePrivateFile(databasePath, false);
       await ensurePrivateFile(`${databasePath}-wal`, false);
       await ensurePrivateFile(`${databasePath}-shm`, false);
@@ -392,8 +443,9 @@ export class WorkflowEngine {
         .prepare(
           `INSERT INTO workflow_runs
             (id, work_item_id, project_id, workflow_type, status, requested_by, created_at,
-             updated_at, project_snapshot_json, snapshot_digest, validation_check_id, version)
-           VALUES (?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, 1)`,
+             updated_at, project_snapshot_json, snapshot_digest, validation_check_id,
+             builder_request_json, version)
+           VALUES (?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, 1)`,
         )
         .run(
           runId,
@@ -406,6 +458,7 @@ export class WorkflowEngine {
           canonicalJson(input.projectSnapshot),
           snapshotDigest,
           input.validationCheckId ?? null,
+          input.builder ? canonicalJson(input.builder) : null,
         );
       const firstStageKey: StageKey = input.validationCheckId ? "allocating_workspace" : "planning";
       this.#insertStage({
@@ -579,6 +632,11 @@ export class WorkflowEngine {
         .prepare("SELECT * FROM workspaces WHERE workflow_run_id = ? ORDER BY created_at, id")
         .all(runId) as ReadonlyArray<SqlRow>
     ).map(this.#mapWorkspace);
+    const agentRuns = (
+      this.#database
+        .prepare("SELECT * FROM agent_runs WHERE workflow_run_id = ? ORDER BY created_at, id")
+        .all(runId) as ReadonlyArray<SqlRow>
+    ).map(this.#mapAgentRun);
     return {
       workItem: this.#mapWorkItem(workItemRow),
       workflowRun,
@@ -588,6 +646,7 @@ export class WorkflowEngine {
       approvals,
       artifacts,
       commands,
+      agentRuns,
       workspaces,
     };
   }
@@ -595,6 +654,11 @@ export class WorkflowEngine {
   readCommand(commandRunId: string): CommandRun {
     this.#assertOpen();
     return this.#findCommandRun(commandRunId);
+  }
+
+  readAgentRun(agentRunId: string): AgentRun {
+    this.#assertOpen();
+    return this.#findAgentRun(agentRunId);
   }
 
   readWorkspace(workspaceId: string): Workspace {
@@ -1183,6 +1247,15 @@ export class WorkflowEngine {
           "Workspace cleanup cannot race an active command.",
         );
       }
+      const activeAgent = this.#database
+        .prepare(
+          `SELECT id FROM agent_runs WHERE workflow_run_id = ?
+           AND status IN ('starting','running','cancel_requested') LIMIT 1`,
+        )
+        .get(workspace.workflowRunId);
+      if (activeAgent) {
+        throw new WorkflowEngineError("conflict", "Workspace cleanup cannot race an active agent.");
+      }
       const now = this.#now();
       const stageId = this.#idGenerator();
       const jobId = this.#idGenerator();
@@ -1674,6 +1747,470 @@ export class WorkflowEngine {
       }
       return this.readWorkflow(run.id);
     });
+  }
+
+  startAgent(input: {
+    readonly agentRunId: string;
+    readonly jobId: string;
+    readonly leaseOwner: string;
+    readonly attemptId: string;
+    readonly expectedStageVersion: number;
+    readonly evidence: AgentStartEvidence;
+  }): AgentRun {
+    return this.#transaction(() => {
+      const agent = this.#findAgentRun(input.agentRunId);
+      const job = this.#findJob(input.jobId);
+      const stage = this.#findStage(agent.stageRunId);
+      const attempt = this.#findAttempt(input.attemptId);
+      const run = this.#findWorkflowRun(agent.workflowRunId);
+      const now = this.#now();
+      if (
+        agent.status !== "pending" ||
+        attempt.stageRunId !== stage.id ||
+        attempt.attemptNumber !== stage.currentAttempt ||
+        attempt.status !== "running" ||
+        job.jobType !== "agent.execute" ||
+        job.status !== "claimed" ||
+        job.leaseOwner !== input.leaseOwner ||
+        job.leaseExpiration === undefined ||
+        job.leaseExpiration <= now ||
+        job.stageRunId !== agent.stageRunId ||
+        job.workflowRunId !== agent.workflowRunId ||
+        stage.version !== input.expectedStageVersion ||
+        run.status !== "building" ||
+        run.cancellationRequestedAt !== undefined
+      ) {
+        throw new WorkflowEngineError(
+          "conflict",
+          "Agent startup lost its workflow or lease fence.",
+        );
+      }
+      this.#database
+        .prepare(
+          `UPDATE agent_runs SET status = 'starting', attempt_id = ?,
+           process_host_execution_id = ?, stdout_artifact_reference = ?,
+           stderr_artifact_reference = ?, pre_git_evidence_json = ?,
+           version = version + 1 WHERE id = ?`,
+        )
+        .run(
+          input.attemptId,
+          input.evidence.processHostExecutionId,
+          input.evidence.stdoutArtifactReference,
+          input.evidence.stderrArtifactReference,
+          canonicalJson(input.evidence.preGitEvidence),
+          agent.id,
+        );
+      this.#insertEvent(run.id, "agent.starting", {
+        agentRunId: agent.id,
+        processHostExecutionId: input.evidence.processHostExecutionId,
+      });
+      return this.#findAgentRun(agent.id);
+    });
+  }
+
+  markAgentRunning(input: {
+    readonly agentRunId: string;
+    readonly expectedVersion: number;
+    readonly evidence: AgentStartedEvidence;
+  }): AgentRun {
+    return this.#transaction(() => {
+      const agent = this.#findAgentRun(input.agentRunId);
+      if (
+        agent.status !== "starting" ||
+        agent.version !== input.expectedVersion ||
+        agent.processHostExecutionId !== input.evidence.processHostExecutionId
+      ) {
+        throw new WorkflowEngineError("stale_version", "Agent launch confirmation lost its fence.");
+      }
+      this.#database
+        .prepare(
+          `UPDATE agent_runs SET status = 'running', started_at = ?, runtime_session_id = ?,
+           runtime_thread_id = ?, process_host_execution_id = ?, native_pid = ?,
+           version = version + 1 WHERE id = ?`,
+        )
+        .run(
+          input.evidence.startedAt,
+          input.evidence.runtimeSessionId,
+          input.evidence.runtimeThreadId,
+          input.evidence.processHostExecutionId,
+          input.evidence.nativePid ?? null,
+          agent.id,
+        );
+      this.#insertEvent(agent.workflowRunId, "agent.started", {
+        agentRunId: agent.id,
+        runtimeSessionId: input.evidence.runtimeSessionId,
+      });
+      return this.#findAgentRun(agent.id);
+    });
+  }
+
+  recordAgentCancellationReceipt(input: {
+    readonly agentRunId: string;
+    readonly expectedVersion: number;
+    readonly evidence: AgentStartedEvidence;
+  }): AgentRun {
+    return this.#transaction(() => {
+      const agent = this.#findAgentRun(input.agentRunId);
+      if (
+        agent.status !== "cancel_requested" ||
+        agent.version !== input.expectedVersion ||
+        agent.processHostExecutionId !== input.evidence.processHostExecutionId
+      ) {
+        throw new WorkflowEngineError(
+          "stale_version",
+          "Cancelled agent launch receipt lost its fence.",
+        );
+      }
+      this.#database
+        .prepare(
+          `UPDATE agent_runs SET started_at = ?, runtime_session_id = ?, runtime_thread_id = ?,
+           native_pid = ?, version = version + 1 WHERE id = ?`,
+        )
+        .run(
+          input.evidence.startedAt,
+          input.evidence.runtimeSessionId,
+          input.evidence.runtimeThreadId,
+          input.evidence.nativePid ?? null,
+          agent.id,
+        );
+      return this.#findAgentRun(agent.id);
+    });
+  }
+
+  failAgentBeforeLaunch(input: {
+    readonly agentRunId: string;
+    readonly jobId: string;
+    readonly leaseOwner: string;
+    readonly expectedStageVersion: number;
+    readonly failureClassification: string;
+  }): WorkflowDetail {
+    return this.#transaction(() => {
+      const agent = this.#findAgentRun(input.agentRunId);
+      const job = this.#findJob(input.jobId);
+      const stage = this.#findStage(agent.stageRunId);
+      const now = this.#now();
+      if (
+        agent.status !== "starting" ||
+        job.jobType !== "agent.execute" ||
+        job.status !== "claimed" ||
+        job.leaseOwner !== input.leaseOwner ||
+        job.leaseExpiration === undefined ||
+        job.leaseExpiration <= now ||
+        job.workflowRunId !== agent.workflowRunId ||
+        job.stageRunId !== agent.stageRunId ||
+        stage.version !== input.expectedStageVersion
+      ) {
+        throw new WorkflowEngineError("conflict", "Agent launch failure lost its durable fence.");
+      }
+      this.#database
+        .prepare(
+          `UPDATE agent_runs SET status = 'failed', completed_at = ?, completion_reason = ?,
+           failure_classification = ?, version = version + 1 WHERE id = ?`,
+        )
+        .run(now, "runtime_not_started", input.failureClassification, agent.id);
+      this.#database
+        .prepare(
+          `UPDATE job_intents SET status = 'failed', terminal_failure = ?, lease_owner = NULL,
+           lease_expiration = NULL, updated_at = ? WHERE id = ?`,
+        )
+        .run(input.failureClassification, now, job.id);
+      this.#database
+        .prepare(
+          `UPDATE attempts SET status = 'failed', completed_at = ?, failure_summary = ?
+           WHERE stage_run_id = ? AND attempt_number = ?`,
+        )
+        .run(now, input.failureClassification, stage.id, stage.currentAttempt);
+      this.#database
+        .prepare(
+          `UPDATE stage_runs SET status = 'failed', completed_at = ?, outcome = 'failed',
+           failure_classification = ?, version = version + 1 WHERE id = ?`,
+        )
+        .run(now, input.failureClassification, stage.id);
+      this.#database
+        .prepare(
+          `UPDATE workflow_runs SET status = 'failed', terminal_outcome = 'failed',
+           updated_at = ?, version = version + 1 WHERE id = ?`,
+        )
+        .run(now, agent.workflowRunId);
+      this.#retainWorkspaceInTransaction(agent.workflowRunId, now);
+      this.#insertEvent(agent.workflowRunId, "agent.failed", {
+        agentRunId: agent.id,
+        failureClassification: input.failureClassification,
+      });
+      return this.readWorkflow(agent.workflowRunId);
+    });
+  }
+
+  completeAgent(input: {
+    readonly agentRunId: string;
+    readonly jobId: string;
+    readonly leaseOwner: string;
+    readonly expectedStageVersion: number;
+    readonly evidence: AgentCompletionEvidence;
+    readonly recovery?: boolean;
+  }): WorkflowDetail {
+    const completionDigest = digestJson(input.evidence);
+    return this.#transaction(() => {
+      const agent = this.#findAgentRun(input.agentRunId);
+      const job = this.#findJob(input.jobId);
+      if (durablyCompletedAgentStatuses.has(agent.status)) {
+        const row = this.#database
+          .prepare("SELECT completion_digest FROM agent_runs WHERE id = ?")
+          .get(agent.id) as SqlRow | undefined;
+        if (optionalString(row ?? {}, "completion_digest") === completionDigest)
+          return this.readWorkflow(agent.workflowRunId);
+        throw new WorkflowEngineError(
+          "conflict",
+          "Agent completion conflicts with durable evidence.",
+        );
+      }
+      const stage = this.#findStage(agent.stageRunId);
+      const run = this.#findWorkflowRun(agent.workflowRunId);
+      const now = this.#now();
+      const cancelled = run.status === "cancelled" || agent.status === "cancel_requested";
+      if (
+        !["running", "cancel_requested"].includes(agent.status) ||
+        !["pending", "claimed", "cancelled"].includes(job.status) ||
+        job.workflowRunId !== agent.workflowRunId ||
+        job.stageRunId !== agent.stageRunId ||
+        agent.stdoutArtifactReference !== input.evidence.stdout.locationReference ||
+        agent.stderrArtifactReference !== input.evidence.stderr.locationReference ||
+        agent.runtimeSessionId !== input.evidence.resultEnvelope.runtimeSessionReference ||
+        input.evidence.resultEnvelope.agentRunId !== agent.id ||
+        (!cancelled &&
+          !input.recovery &&
+          (job.leaseOwner !== input.leaseOwner ||
+            job.leaseExpiration === undefined ||
+            job.leaseExpiration <= now ||
+            stage.version !== input.expectedStageVersion)) ||
+        (input.recovery === true && stage.version !== input.expectedStageVersion)
+      ) {
+        throw new WorkflowEngineError("conflict", "Agent completion lost its durable fence.");
+      }
+      const status: AgentRun["status"] = cancelled
+        ? "cancelled"
+        : input.evidence.policyViolations.length > 0
+          ? "operator_attention"
+          : input.evidence.outcome;
+      const failureClassification =
+        status === "completed"
+          ? null
+          : status === "operator_attention"
+            ? "agent_policy_violation"
+            : `agent_${status}`;
+      this.#database
+        .prepare(
+          `UPDATE agent_runs SET status = ?, completed_at = ?, result_envelope_json = ?,
+           result_envelope_digest = ?, completion_reason = ?, failure_classification = ?,
+           operator_attention_reason = ?, stdout_artifact_reference = ?, stderr_artifact_reference = ?,
+           stdout_digest = ?, stderr_digest = ?, stdout_observed_bytes = ?,
+           stderr_observed_bytes = ?, stdout_persisted_bytes = ?, stderr_persisted_bytes = ?,
+           stdout_truncated = ?, stderr_truncated = ?, post_git_evidence_json = ?,
+           policy_violations_json = ?, completion_digest = ?, version = version + 1 WHERE id = ?`,
+        )
+        .run(
+          status,
+          now,
+          canonicalJson(input.evidence.resultEnvelope),
+          digestJson(input.evidence.resultEnvelope),
+          input.evidence.completionReason,
+          failureClassification,
+          status === "operator_attention" ? input.evidence.policyViolations.join(",") : null,
+          input.evidence.stdout.locationReference,
+          input.evidence.stderr.locationReference,
+          input.evidence.stdout.digest,
+          input.evidence.stderr.digest,
+          input.evidence.stdout.observedBytes,
+          input.evidence.stderr.observedBytes,
+          input.evidence.stdout.persistedBytes,
+          input.evidence.stderr.persistedBytes,
+          input.evidence.stdout.truncated ? 1 : 0,
+          input.evidence.stderr.truncated ? 1 : 0,
+          canonicalJson(input.evidence.postGitEvidence),
+          canonicalJson(input.evidence.policyViolations),
+          completionDigest,
+          agent.id,
+        );
+      if (!cancelled) {
+        this.#database
+          .prepare(
+            `UPDATE job_intents SET status = 'completed', lease_owner = NULL,
+             lease_expiration = NULL, completion_metadata_json = ?, completion_owner = ?,
+             completion_stage_version = ?, completion_digest = ?, updated_at = ? WHERE id = ?`,
+          )
+          .run(
+            canonicalJson({ agentRunId: agent.id, outcome: status }),
+            input.leaseOwner,
+            input.expectedStageVersion,
+            completionDigest,
+            now,
+            job.id,
+          );
+      }
+      this.#database
+        .prepare(
+          `UPDATE attempts SET status = ?, completed_at = ?, failure_summary = ?
+           WHERE stage_run_id = ? AND attempt_number = ?`,
+        )
+        .run(
+          status === "completed" ? "completed" : "failed",
+          now,
+          failureClassification,
+          stage.id,
+          stage.currentAttempt,
+        );
+      this.#insertEvent(run.id, `agent.${status}`, {
+        agentRunId: agent.id,
+        completionReason: input.evidence.completionReason,
+        policyViolations: input.evidence.policyViolations,
+      });
+      this.#insertEvent(run.id, "agent.output_available", {
+        agentRunId: agent.id,
+        stdoutArtifactReference: input.evidence.stdout.locationReference,
+        stderrArtifactReference: input.evidence.stderr.locationReference,
+      });
+      if (cancelled) return this.readWorkflow(run.id);
+      if (status !== "completed") {
+        const runStatus = status === "operator_attention" ? "operator_attention" : "failed";
+        this.#database
+          .prepare(
+            `UPDATE stage_runs SET status = ?, completed_at = ?, outcome = ?,
+             failure_classification = ?, version = version + 1 WHERE id = ?`,
+          )
+          .run(runStatus, now, status, failureClassification, stage.id);
+        this.#database
+          .prepare(
+            `UPDATE workflow_runs SET status = ?, terminal_outcome = ?, updated_at = ?,
+             version = version + 1 WHERE id = ?`,
+          )
+          .run(runStatus, runStatus, now, run.id);
+        this.#retainWorkspaceInTransaction(run.id, now);
+        this.#insertEvent(run.id, `workflow.${runStatus}`, {
+          agentRunId: agent.id,
+          failureClassification,
+        });
+        return this.readWorkflow(run.id);
+      }
+      this.#database
+        .prepare(
+          `UPDATE stage_runs SET status = 'completed', completed_at = ?, outcome = 'succeeded',
+           version = version + 1 WHERE id = ?`,
+        )
+        .run(now, stage.id);
+      const validationStageId = this.#idGenerator();
+      const commandId = this.#idGenerator();
+      const commandJobId = this.#idGenerator();
+      this.#insertStage({
+        id: validationStageId,
+        runId: run.id,
+        stageKey: "validating",
+        sequence: stage.sequence + 1,
+        now,
+      });
+      const workspace = this.#findWorkspace(agent.workspaceId);
+      if (!run.validationCheckId || !workspace.canonicalWorktreePath) {
+        throw new WorkflowEngineError(
+          "invalid_transition",
+          "Builder validation evidence is incomplete.",
+        );
+      }
+      this.#insertValidationCommand({
+        id: commandId,
+        run,
+        stageId: validationStageId,
+        commandId: run.validationCheckId,
+        executionRoot: workspace.canonicalWorktreePath,
+        now,
+      });
+      this.#insertJob({
+        id: commandJobId,
+        runId: run.id,
+        stageId: validationStageId,
+        stageKey: "validating",
+        validationCheckId: run.validationCheckId,
+        now,
+      });
+      this.#database
+        .prepare(
+          "UPDATE workflow_runs SET status = 'validating', updated_at = ?, version = version + 1 WHERE id = ?",
+        )
+        .run(now, run.id);
+      this.#insertEvent(run.id, "stage.completed", { stageRunId: stage.id, stageKey: "building" });
+      this.#insertEvent(run.id, "stage.queued", {
+        stageRunId: validationStageId,
+        stageKey: "validating",
+      });
+      this.#insertEvent(run.id, "job.pending", { jobId: commandJobId, jobType: "command.execute" });
+      return this.readWorkflow(run.id);
+    });
+  }
+
+  markAgentOperatorAttention(agentRunId: string, reason: string): WorkflowDetail {
+    return this.#transaction(() => {
+      const agent = this.#findAgentRun(agentRunId);
+      if (agent.status === "operator_attention") return this.readWorkflow(agent.workflowRunId);
+      if (terminalAgentStatuses.has(agent.status)) {
+        throw new WorkflowEngineError(
+          "invalid_transition",
+          "A terminal agent run cannot be reconciled again.",
+        );
+      }
+      const now = this.#now();
+      const run = this.#findWorkflowRun(agent.workflowRunId);
+      this.#database
+        .prepare(
+          `UPDATE agent_runs SET status = 'operator_attention', completed_at = ?,
+           failure_classification = 'runtime_recovery_ambiguous', operator_attention_reason = ?,
+           version = version + 1 WHERE id = ?`,
+        )
+        .run(now, reason, agent.id);
+      if (run.status !== "cancelled") {
+        this.#database
+          .prepare(
+            `UPDATE workflow_runs SET status = 'operator_attention', terminal_outcome = 'operator_attention',
+             updated_at = ?, version = version + 1 WHERE id = ?`,
+          )
+          .run(now, agent.workflowRunId);
+        this.#database
+          .prepare(
+            `UPDATE stage_runs SET status = 'operator_attention', completed_at = ?,
+             outcome = 'operator_attention', failure_classification = 'runtime_recovery_ambiguous',
+             version = version + 1 WHERE id = ?`,
+          )
+          .run(now, agent.stageRunId);
+      }
+      this.#database
+        .prepare(
+          `UPDATE job_intents SET status = 'failed', terminal_failure = ?, lease_owner = NULL,
+           lease_expiration = NULL, updated_at = ?
+           WHERE workflow_run_id = ? AND stage_run_id = ? AND job_type = 'agent.execute'
+             AND status IN ('pending','claimed')`,
+        )
+        .run(reason, now, agent.workflowRunId, agent.stageRunId);
+      this.#database
+        .prepare(
+          `UPDATE attempts SET status = 'failed', completed_at = ?, failure_summary = ?
+           WHERE stage_run_id = ? AND status = 'running'`,
+        )
+        .run(now, reason, agent.stageRunId);
+      this.#retainWorkspaceInTransaction(agent.workflowRunId, now);
+      this.#insertEvent(agent.workflowRunId, "agent.operator_attention_required", {
+        agentRunId: agent.id,
+        reason,
+      });
+      return this.readWorkflow(agent.workflowRunId);
+    });
+  }
+
+  listAgentRunsForReconciliation(): ReadonlyArray<AgentRun> {
+    this.#assertOpen();
+    return (
+      this.#database
+        .prepare(
+          "SELECT * FROM agent_runs WHERE status IN ('starting','running','cancel_requested','blocked')",
+        )
+        .all() as ReadonlyArray<SqlRow>
+    ).map(this.#mapAgentRun);
   }
 
   startCommand(input: {
@@ -2849,38 +3386,48 @@ export class WorkflowEngine {
          version = version + 1 WHERE id = ?`,
       )
       .run(input.now, input.stage.id);
-    const validationStageId = this.#idGenerator();
-    const commandId = this.#idGenerator();
-    const commandJobId = this.#idGenerator();
+    const nextStageId = this.#idGenerator();
+    const nextJobId = this.#idGenerator();
+    const nextStageKey: StageKey = run.builderRequest ? "building" : "validating";
     this.#insertStage({
-      id: validationStageId,
+      id: nextStageId,
       runId: run.id,
-      stageKey: "validating",
+      stageKey: nextStageKey,
       sequence: input.stage.sequence + 1,
       now: input.now,
     });
-    this.#insertValidationCommand({
-      id: commandId,
-      run,
-      stageId: validationStageId,
-      commandId: run.validationCheckId,
-      executionRoot: input.input.evidence.canonicalWorktreePath,
-      now: input.now,
-    });
+    if (run.builderRequest) {
+      this.#insertAgentRun({
+        id: this.#idGenerator(),
+        run,
+        workspace: this.#findWorkspace(input.workspace.id),
+        stageId: nextStageId,
+        now: input.now,
+      });
+    } else {
+      this.#insertValidationCommand({
+        id: this.#idGenerator(),
+        run,
+        stageId: nextStageId,
+        commandId: run.validationCheckId,
+        executionRoot: input.input.evidence.canonicalWorktreePath,
+        now: input.now,
+      });
+    }
     this.#insertJob({
-      id: commandJobId,
+      id: nextJobId,
       runId: run.id,
-      stageId: validationStageId,
-      stageKey: "validating",
-      validationCheckId: run.validationCheckId,
+      stageId: nextStageId,
+      stageKey: nextStageKey,
+      ...(nextStageKey === "validating" ? { validationCheckId: run.validationCheckId } : {}),
       now: input.now,
     });
     this.#database
       .prepare(
-        `UPDATE workflow_runs SET status = 'validating', updated_at = ?, version = version + 1
+        `UPDATE workflow_runs SET status = ?, updated_at = ?, version = version + 1
          WHERE id = ?`,
       )
-      .run(input.now, run.id);
+      .run(nextStageKey, input.now, run.id);
     this.#insertEvent(run.id, "workspace.ready", {
       workspaceId: input.workspace.id,
       worktreePath: input.input.evidence.canonicalWorktreePath,
@@ -2891,14 +3438,14 @@ export class WorkflowEngine {
       stageKey: input.stage.stageKey,
     });
     this.#insertEvent(run.id, "stage.queued", {
-      stageRunId: validationStageId,
-      stageKey: "validating",
+      stageRunId: nextStageId,
+      stageKey: nextStageKey,
       sequence: input.stage.sequence + 1,
     });
     this.#insertEvent(run.id, "job.pending", {
-      jobId: commandJobId,
-      stageRunId: validationStageId,
-      jobType: "command.execute",
+      jobId: nextJobId,
+      stageRunId: nextStageId,
+      jobType: nextStageKey === "building" ? "agent.execute" : "command.execute",
     });
   }
 
@@ -2953,6 +3500,44 @@ export class WorkflowEngine {
         category: "check",
         commandId: input.validationCheckId,
       });
+    }
+    if (input.builder !== undefined) {
+      if (!input.validationCheckId) {
+        throw new WorkflowEngineError(
+          "invalid_request",
+          "The single-builder workflow requires a declared validation check.",
+        );
+      }
+      if (
+        input.builder.objective.trim().length === 0 ||
+        input.builder.acceptanceCriteria.length === 0 ||
+        input.builder.acceptanceCriteria.some((criterion) => criterion.trim().length === 0) ||
+        input.builder.allowedPaths.length === 0 ||
+        input.builder.runtime.kind !== "codex" ||
+        (input.builder.runtime.model !== undefined &&
+          input.builder.runtime.model.trim().length === 0) ||
+        !Number.isSafeInteger(input.builder.runtime.maximumRuntimeSeconds) ||
+        input.builder.runtime.maximumRuntimeSeconds < 1 ||
+        input.builder.runtime.maximumRuntimeSeconds > 86_400
+      ) {
+        throw new WorkflowEngineError("invalid_request", "The single-builder request is invalid.");
+      }
+      const patterns = [...input.builder.allowedPaths, ...(input.builder.forbiddenPaths ?? [])];
+      if (
+        patterns.some(
+          (pattern) =>
+            pattern.trim().length === 0 ||
+            pattern.length > 512 ||
+            [...pattern].filter((character) => character === "*").length > 32 ||
+            NodePath.isAbsolute(pattern) ||
+            pattern.split(/[\\/]/u).includes(".."),
+        )
+      ) {
+        throw new WorkflowEngineError(
+          "invalid_request",
+          "Builder scope paths must be project-relative and cannot traverse upward.",
+        );
+      }
     }
   }
 
@@ -3056,6 +3641,82 @@ export class WorkflowEngine {
     });
   }
 
+  #insertAgentRun(input: {
+    readonly id: string;
+    readonly run: WorkflowRun;
+    readonly workspace: Workspace;
+    readonly stageId: string;
+    readonly now: string;
+  }): void {
+    const builder = input.run.builderRequest as SingleBuilderRequest | undefined;
+    if (!builder || !input.run.validationCheckId || !input.workspace.canonicalWorktreePath) {
+      throw new WorkflowEngineError(
+        "invalid_transition",
+        "A builder run requires a validated builder request, check, and ready workspace.",
+      );
+    }
+    const workItemRow = this.#database
+      .prepare("SELECT * FROM work_items WHERE id = ?")
+      .get(input.run.workItemId) as SqlRow | undefined;
+    if (!workItemRow)
+      throw new WorkflowEngineError("not_found", "Workflow work item was not found.");
+    const workItem = this.#mapWorkItem(workItemRow);
+    const taskEnvelope = {
+      version: 1,
+      role: "single-builder",
+      workItemId: workItem.id,
+      workflowRunId: input.run.id,
+      agentRunId: input.id,
+      projectId: input.run.projectId,
+      objective: builder.objective,
+      task: { title: workItem.title, description: workItem.description },
+      acceptanceCriteria: builder.acceptanceCriteria,
+      scope: {
+        allowedPaths: builder.allowedPaths,
+        forbiddenPaths: [...new Set([".git/**", ".mkcode/**", ...(builder.forbiddenPaths ?? [])])],
+      },
+      worktreePathReference: input.workspace.canonicalWorktreePath,
+      contextFileReferences: input.run.projectSnapshot.repository.contextFiles.map(
+        (reference) => reference.path,
+      ),
+      validationCheckId: input.run.validationCheckId,
+      maximumRuntimeSeconds: builder.runtime.maximumRuntimeSeconds,
+      cancellationPolicy: "interrupt_then_kill",
+      completionOutput: { structuredResultRequired: true },
+    };
+    const runtimeConfiguration = {
+      kind: "codex",
+      ...(builder.runtime.model ? { model: builder.runtime.model } : {}),
+      sandbox: "workspace-write",
+      executable: "codex",
+    };
+    this.#database
+      .prepare(
+        `INSERT INTO agent_runs
+          (id, workflow_run_id, stage_run_id, workspace_id, semantic_role, runtime_kind,
+           runtime_configuration_json, task_envelope_version, task_envelope_json,
+           task_envelope_digest, status, created_at, scheduled_at, version)
+         VALUES (?, ?, ?, ?, 'single-builder', 'codex', ?, 1, ?, ?, 'pending', ?, ?, 1)`,
+      )
+      .run(
+        input.id,
+        input.run.id,
+        input.stageId,
+        input.workspace.id,
+        canonicalJson(runtimeConfiguration),
+        canonicalJson(taskEnvelope),
+        digestJson(taskEnvelope),
+        input.now,
+        input.now,
+      );
+    this.#insertEvent(input.run.id, "agent.scheduled", {
+      agentRunId: input.id,
+      stageRunId: input.stageId,
+      role: "single-builder",
+      runtimeKind: "codex",
+    });
+  }
+
   #insertEvent(runId: string, eventType: string, payload: Readonly<Record<string, unknown>>): void {
     this.#database
       .prepare(
@@ -3078,6 +3739,14 @@ export class WorkflowEngine {
         )
         .all(runId) as ReadonlyArray<SqlRow>
     ).map(this.#mapCommandRun);
+    const activeAgents = (
+      this.#database
+        .prepare(
+          `SELECT * FROM agent_runs
+           WHERE workflow_run_id = ? AND status IN ('pending','starting','running','cancel_requested')`,
+        )
+        .all(runId) as ReadonlyArray<SqlRow>
+    ).map(this.#mapAgentRun);
     this.#database
       .prepare(
         `UPDATE workflow_runs
@@ -3094,6 +3763,18 @@ export class WorkflowEngine {
          WHERE workflow_run_id = ? AND status IN ('pending','claimed')`,
       )
       .run(now, runId);
+    this.#database
+      .prepare(
+        `UPDATE agent_runs SET status = CASE
+           WHEN status = 'pending' THEN 'cancelled' ELSE 'cancel_requested' END,
+         cancellation_requested_at = ?,
+         completed_at = CASE WHEN status = 'pending' THEN ? ELSE completed_at END,
+         completion_reason = CASE WHEN status = 'pending' THEN 'workflow_cancelled_before_start'
+           ELSE completion_reason END,
+         version = version + 1
+         WHERE workflow_run_id = ? AND status IN ('pending','starting','running','cancel_requested')`,
+      )
+      .run(now, now, runId);
     this.#database
       .prepare(
         `UPDATE attempts SET status = 'cancelled', completed_at = ?
@@ -3139,10 +3820,28 @@ export class WorkflowEngine {
         requestedBy,
       });
     }
+    for (const agent of activeAgents) {
+      if (["starting", "running", "cancel_requested"].includes(agent.status)) {
+        this.#insertEvent(runId, "agent.cancel_requested", {
+          agentRunId: agent.id,
+          requestedBy,
+        });
+      } else {
+        this.#insertEvent(runId, "agent.cancelled", {
+          agentRunId: agent.id,
+          requestedBy,
+        });
+      }
+    }
     const hasRunningProcess = activeCommands.some((command) =>
       ["starting", "running", "cancelling"].includes(command.status),
     );
-    if (hasRunningProcess) {
+    if (activeAgents.length > 0 || run.builderRequest) {
+      this.#retainWorkspaceInTransaction(runId, now);
+      this.#insertEvent(runId, "workspace.cleanup_deferred", {
+        reason: "single_builder_workspace_retained_after_cancellation",
+      });
+    } else if (hasRunningProcess) {
       this.#retainWorkspaceInTransaction(runId, now);
       this.#insertEvent(runId, "workspace.cleanup_deferred", {
         reason: "command_process_must_settle",
@@ -3261,6 +3960,14 @@ export class WorkflowEngine {
     return this.#mapWorkspace(row);
   }
 
+  #findAgentRun(agentRunId: string): AgentRun {
+    const row = this.#database.prepare("SELECT * FROM agent_runs WHERE id = ?").get(agentRunId) as
+      | SqlRow
+      | undefined;
+    if (!row) throw new WorkflowEngineError("not_found", "Agent run was not found.");
+    return this.#mapAgentRun(row);
+  }
+
   #findApproval(approvalId: string): Approval {
     const row = this.#database.prepare("SELECT * FROM approvals WHERE id = ?").get(approvalId) as
       | SqlRow
@@ -3308,6 +4015,9 @@ export class WorkflowEngine {
       : {}),
     ...(optionalString(row, "validation_check_id")
       ? { validationCheckId: optionalString(row, "validation_check_id") }
+      : {}),
+    ...(row.builder_request_json
+      ? { builderRequest: parseJson<Record<string, unknown>>(row.builder_request_json) }
       : {}),
     version: asNumber(row, "version"),
   });
@@ -3471,6 +4181,84 @@ export class WorkflowEngine {
     ...(optionalString(row, "failure_classification")
       ? { failureClassification: optionalString(row, "failure_classification") }
       : {}),
+    version: asNumber(row, "version"),
+  });
+
+  readonly #mapAgentRun = (row: SqlRow): AgentRun => ({
+    id: asString(row, "id"),
+    workflowRunId: asString(row, "workflow_run_id"),
+    stageRunId: asString(row, "stage_run_id"),
+    ...(optionalString(row, "attempt_id") ? { attemptId: optionalString(row, "attempt_id") } : {}),
+    workspaceId: asString(row, "workspace_id"),
+    semanticRole: "single-builder",
+    runtimeKind: "codex",
+    runtimeConfiguration: parseJson<Record<string, unknown>>(row.runtime_configuration_json),
+    taskEnvelopeVersion: 1,
+    taskEnvelope: parseJson<Record<string, unknown>>(row.task_envelope_json),
+    taskEnvelopeDigest: asString(row, "task_envelope_digest"),
+    status: asString(row, "status") as AgentRun["status"],
+    createdAt: asString(row, "created_at"),
+    scheduledAt: asString(row, "scheduled_at"),
+    ...(optionalString(row, "started_at") ? { startedAt: optionalString(row, "started_at") } : {}),
+    ...(optionalString(row, "completed_at")
+      ? { completedAt: optionalString(row, "completed_at") }
+      : {}),
+    ...(optionalString(row, "cancellation_requested_at")
+      ? { cancellationRequestedAt: optionalString(row, "cancellation_requested_at") }
+      : {}),
+    ...(optionalString(row, "runtime_session_id")
+      ? { runtimeSessionId: optionalString(row, "runtime_session_id") }
+      : {}),
+    ...(optionalString(row, "runtime_thread_id")
+      ? { runtimeThreadId: optionalString(row, "runtime_thread_id") }
+      : {}),
+    ...(optionalString(row, "process_host_execution_id")
+      ? { processHostExecutionId: optionalString(row, "process_host_execution_id") }
+      : {}),
+    ...(optionalNumber(row, "native_pid") === undefined
+      ? {}
+      : { nativePid: optionalNumber(row, "native_pid") }),
+    runtimeEventCursor: asNumber(row, "runtime_event_cursor"),
+    ...(row.result_envelope_json
+      ? { resultEnvelope: parseJson<Record<string, unknown>>(row.result_envelope_json) }
+      : {}),
+    ...(optionalString(row, "result_envelope_digest")
+      ? { resultEnvelopeDigest: optionalString(row, "result_envelope_digest") }
+      : {}),
+    ...(optionalString(row, "completion_reason")
+      ? { completionReason: optionalString(row, "completion_reason") }
+      : {}),
+    ...(optionalString(row, "failure_classification")
+      ? { failureClassification: optionalString(row, "failure_classification") }
+      : {}),
+    ...(optionalString(row, "operator_attention_reason")
+      ? { operatorAttentionReason: optionalString(row, "operator_attention_reason") }
+      : {}),
+    ...(optionalString(row, "stdout_artifact_reference")
+      ? { stdoutArtifactReference: optionalString(row, "stdout_artifact_reference") }
+      : {}),
+    ...(optionalString(row, "stderr_artifact_reference")
+      ? { stderrArtifactReference: optionalString(row, "stderr_artifact_reference") }
+      : {}),
+    ...(optionalString(row, "stdout_digest")
+      ? { stdoutDigest: optionalString(row, "stdout_digest") }
+      : {}),
+    ...(optionalString(row, "stderr_digest")
+      ? { stderrDigest: optionalString(row, "stderr_digest") }
+      : {}),
+    stdoutObservedBytes: asNumber(row, "stdout_observed_bytes"),
+    stderrObservedBytes: asNumber(row, "stderr_observed_bytes"),
+    stdoutPersistedBytes: asNumber(row, "stdout_persisted_bytes"),
+    stderrPersistedBytes: asNumber(row, "stderr_persisted_bytes"),
+    stdoutTruncated: asNumber(row, "stdout_truncated") === 1,
+    stderrTruncated: asNumber(row, "stderr_truncated") === 1,
+    ...(row.pre_git_evidence_json
+      ? { preGitEvidence: parseJson<Record<string, unknown>>(row.pre_git_evidence_json) }
+      : {}),
+    ...(row.post_git_evidence_json
+      ? { postGitEvidence: parseJson<Record<string, unknown>>(row.post_git_evidence_json) }
+      : {}),
+    policyViolations: parseJson<ReadonlyArray<string>>(row.policy_violations_json),
     version: asNumber(row, "version"),
   });
 

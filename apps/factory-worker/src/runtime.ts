@@ -3,9 +3,12 @@
 // @effect-diagnostics globalConsole:off -- This file owns the imperative process loop.
 import type * as NodeHttp from "node:http";
 
+import { CodexAgentRuntime } from "@mkcode/agent-runtime";
 import { DeterministicCommandRunner } from "@mkcode/command-runner";
 import { WorkflowEngine } from "@mkcode/workflow-engine";
+import { GitWorktreeWorkspaceManager } from "@mkcode/workspace-manager";
 
+import { AgentExecutionWorker } from "./agentWorker.ts";
 import { createFactoryApiServer } from "./api.ts";
 import { CommandExecutionWorker } from "./commandWorker.ts";
 import type { FactoryWorkerConfig } from "./config.ts";
@@ -96,14 +99,26 @@ export async function startFactoryWorker(
     workerInstanceId: config.workerInstanceId,
     leaseMilliseconds: config.leaseMilliseconds,
   });
+  const workspaceManager = new GitWorktreeWorkspaceManager();
   const workspaceWorker = new WorkspaceExecutionWorker({
     engine,
     workerInstanceId: config.workerInstanceId,
     factoryStateRoot: config.stateDirectory,
     leaseMilliseconds: config.leaseMilliseconds,
+    manager: workspaceManager,
+  });
+  const agentRuntime = new CodexAgentRuntime({ stateRoot: config.stateDirectory });
+  const agentWorker = new AgentExecutionWorker({
+    engine,
+    runtime: agentRuntime,
+    workspaceManager,
+    workerInstanceId: config.workerInstanceId,
+    leaseMilliseconds: config.leaseMilliseconds,
+    redactionValues: [config.credential],
   });
   try {
     await workspaceWorker.reconcileAll();
+    await agentWorker.reconcileAll();
   } catch (cause) {
     engine.close();
     throw cause;
@@ -113,7 +128,11 @@ export async function startFactoryWorker(
     credential: config.credential,
     workerInstanceId: config.workerInstanceId,
     outputStore: commandRunner.outputStore,
-    onWorkflowCancelled: (workflowRunId) => commandWorker.cancelWorkflow(workflowRunId),
+    agentOutputStore: agentRuntime.outputStore,
+    onWorkflowCancelled: (workflowRunId) => {
+      commandWorker.cancelWorkflow(workflowRunId);
+      agentWorker.cancelWorkflow(workflowRunId);
+    },
   });
 
   try {
@@ -125,6 +144,7 @@ export async function startFactoryWorker(
 
   let polling = false;
   let workspaceOperationInFlight = false;
+  let agentOperationInFlight = false;
   let currentPoll: Promise<void> | undefined;
   const interval = setInterval(() => {
     if (polling) return;
@@ -145,6 +165,13 @@ export async function startFactoryWorker(
           }
         } else if (claimed.job.jobType === "command.execute") {
           await commandWorker.runClaimed(claimed);
+        } else if (claimed.job.jobType === "agent.execute") {
+          agentOperationInFlight = true;
+          try {
+            await agentWorker.runClaimed(claimed);
+          } finally {
+            agentOperationInFlight = false;
+          }
         } else {
           await simulationWorker.runClaimed(claimed);
         }
@@ -174,10 +201,12 @@ export async function startFactoryWorker(
       stopped = true;
       simulationWorker.stop();
       commandWorker.stop();
+      const agentStop = agentWorker.stop();
       workspaceWorker.stop();
       clearInterval(interval);
+      await agentStop;
       await waitForPoll(currentPoll, config.shutdownGraceMilliseconds);
-      if (workspaceOperationInFlight && currentPoll) await currentPoll;
+      if ((workspaceOperationInFlight || agentOperationInFlight) && currentPoll) await currentPoll;
       try {
         await close(server);
       } finally {

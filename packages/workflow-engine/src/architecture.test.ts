@@ -43,6 +43,7 @@ describe("factory architecture boundaries", () => {
     const engine = await readPackage("packages/workflow-engine");
     const commandRunner = await readPackage("packages/command-runner");
     const workspaceManager = await readPackage("packages/workspace-manager");
+    const agentRuntime = await readPackage("packages/agent-runtime");
 
     NodeAssert.equal(dependencyVersion(server, "@mkcode/workflow-engine"), undefined);
     NodeAssert.equal(dependencyVersion(server, "@mkcode/factory-worker"), undefined);
@@ -62,9 +63,14 @@ describe("factory architecture boundaries", () => {
     NodeAssert.equal(dependencyVersion(workspaceManager, "@mkcode/factory-contracts"), undefined);
     NodeAssert.equal(dependencyVersion(web, "@mkcode/workspace-manager"), undefined);
     NodeAssert.equal(dependencyVersion(server, "@mkcode/workspace-manager"), undefined);
+    NodeAssert.equal(dependencyVersion(engine, "@mkcode/agent-runtime"), undefined);
+    NodeAssert.equal(dependencyVersion(agentRuntime, "@mkcode/workflow-engine"), undefined);
+    NodeAssert.equal(dependencyVersion(agentRuntime, "@mkcode/workspace-manager"), undefined);
+    NodeAssert.equal(dependencyVersion(web, "@mkcode/agent-runtime"), undefined);
+    NodeAssert.equal(dependencyVersion(server, "@mkcode/agent-runtime"), undefined);
   });
 
-  it("keeps process launch isolated behind command-runner and excludes Git, worktrees, and providers", async () => {
+  it("keeps process launch behind runtime packages and provider protocol out of the engine", async () => {
     const files = await sourceFiles(NodePath.join(repositoryRoot, "apps/factory-worker/src"));
     const productionSource = (
       await Promise.all(files.map((file) => NodeFSP.readFile(file, "utf8")))
@@ -75,15 +81,31 @@ describe("factory architecture boundaries", () => {
       "spawn(",
       "execFile(",
       "git worktree",
-      "Claude",
-      "Codex",
-      "OpenCode",
       "Herdr",
     ]) {
       NodeAssert.equal(
         productionSource.includes(forbidden),
         false,
         `Worker production code unexpectedly contains '${forbidden}'.`,
+      );
+    }
+    const engineFiles = await sourceFiles(
+      NodePath.join(repositoryRoot, "packages/workflow-engine/src"),
+    );
+    const engineSource = (
+      await Promise.all(engineFiles.map((file) => NodeFSP.readFile(file, "utf8")))
+    ).join("\n");
+    for (const forbidden of [
+      "node:child_process",
+      "child_process",
+      "codex exec",
+      "thread.started",
+      "@mkcode/agent-runtime",
+    ]) {
+      NodeAssert.equal(
+        engineSource.includes(forbidden),
+        false,
+        `Workflow engine unexpectedly contains '${forbidden}'.`,
       );
     }
     const commandFiles = await sourceFiles(
@@ -123,6 +145,7 @@ describe("factory architecture boundaries", () => {
       "workflow_events",
       "command_runs",
       "workspaces",
+      "agent_runs",
     ]) {
       NodeAssert.equal(migrationSource.includes(table), false);
     }

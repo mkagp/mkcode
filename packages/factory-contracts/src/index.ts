@@ -29,6 +29,7 @@ export const WorkflowRunStatus = Schema.Literals([
   "allocating_workspace",
   "planning",
   "implementing",
+  "building",
   "validating",
   "human_review",
   "completed",
@@ -63,6 +64,7 @@ export const WorkflowRun = Schema.Struct({
   cancellationRequestedBy: Schema.optional(Schema.String),
   terminalOutcome: Schema.optional(WorkflowTerminalOutcome),
   validationCheckId: Schema.optional(Schema.String),
+  builderRequest: Schema.optional(Schema.Record(Schema.String, Schema.Unknown)),
   version: NonNegativeInt,
 });
 export type WorkflowRun = typeof WorkflowRun.Type;
@@ -71,6 +73,7 @@ export const StageKey = Schema.Literals([
   "allocating_workspace",
   "planning",
   "implementing",
+  "building",
   "validating",
   "human_review",
   "workspace_cleanup",
@@ -141,6 +144,7 @@ export const JobType = Schema.Literals([
   "command.execute",
   "workspace.allocate",
   "workspace.cleanup",
+  "agent.execute",
 ]);
 export type JobType = typeof JobType.Type;
 export const SimulationJobType = Schema.Literals([
@@ -327,6 +331,91 @@ export const CommandOutputPage = Schema.Struct({
 });
 export type CommandOutputPage = typeof CommandOutputPage.Type;
 
+export const BuilderRuntimeRequest = Schema.Struct({
+  kind: Schema.Literal("codex"),
+  model: Schema.optional(TrimmedNonEmptyString),
+  maximumRuntimeSeconds: PositiveInt,
+});
+export type BuilderRuntimeRequest = typeof BuilderRuntimeRequest.Type;
+
+export const SingleBuilderRequest = Schema.Struct({
+  objective: TrimmedNonEmptyString,
+  acceptanceCriteria: Schema.Array(TrimmedNonEmptyString).check(Schema.isMinLength(1)),
+  allowedPaths: Schema.Array(TrimmedNonEmptyString).check(Schema.isMinLength(1)),
+  forbiddenPaths: Schema.optional(Schema.Array(TrimmedNonEmptyString)),
+  runtime: BuilderRuntimeRequest,
+});
+export type SingleBuilderRequest = typeof SingleBuilderRequest.Type;
+
+export const AgentRunStatus = Schema.Literals([
+  "pending",
+  "starting",
+  "running",
+  "cancel_requested",
+  "completed",
+  "cancelled",
+  "failed",
+  "timed_out",
+  "blocked",
+  "operator_attention",
+]);
+export type AgentRunStatus = typeof AgentRunStatus.Type;
+
+export const AgentRun = Schema.Struct({
+  id: Schema.String,
+  workflowRunId: Schema.String,
+  stageRunId: Schema.String,
+  attemptId: Schema.optional(Schema.String),
+  workspaceId: Schema.String,
+  semanticRole: Schema.Literal("single-builder"),
+  runtimeKind: Schema.Literal("codex"),
+  runtimeConfiguration: Schema.Record(Schema.String, Schema.Unknown),
+  taskEnvelopeVersion: Schema.Literal(1),
+  taskEnvelope: Schema.Record(Schema.String, Schema.Unknown),
+  taskEnvelopeDigest: Schema.String,
+  status: AgentRunStatus,
+  createdAt: Schema.String,
+  scheduledAt: Schema.String,
+  startedAt: Schema.optional(Schema.String),
+  completedAt: Schema.optional(Schema.String),
+  cancellationRequestedAt: Schema.optional(Schema.String),
+  runtimeSessionId: Schema.optional(Schema.String),
+  runtimeThreadId: Schema.optional(Schema.String),
+  processHostExecutionId: Schema.optional(Schema.String),
+  nativePid: Schema.optional(PositiveInt),
+  runtimeEventCursor: NonNegativeInt,
+  resultEnvelope: Schema.optional(Schema.Record(Schema.String, Schema.Unknown)),
+  resultEnvelopeDigest: Schema.optional(Schema.String),
+  completionReason: Schema.optional(Schema.String),
+  failureClassification: Schema.optional(Schema.String),
+  operatorAttentionReason: Schema.optional(Schema.String),
+  stdoutArtifactReference: Schema.optional(Schema.String),
+  stderrArtifactReference: Schema.optional(Schema.String),
+  stdoutDigest: Schema.optional(Schema.String),
+  stderrDigest: Schema.optional(Schema.String),
+  stdoutObservedBytes: NonNegativeInt,
+  stderrObservedBytes: NonNegativeInt,
+  stdoutPersistedBytes: NonNegativeInt,
+  stderrPersistedBytes: NonNegativeInt,
+  stdoutTruncated: Schema.Boolean,
+  stderrTruncated: Schema.Boolean,
+  preGitEvidence: Schema.optional(Schema.Record(Schema.String, Schema.Unknown)),
+  postGitEvidence: Schema.optional(Schema.Record(Schema.String, Schema.Unknown)),
+  policyViolations: Schema.Array(Schema.String),
+  version: PositiveInt,
+});
+export type AgentRun = typeof AgentRun.Type;
+
+export const AgentOutputPage = Schema.Struct({
+  agentRunId: Schema.String,
+  stream: Schema.Literals(["stdout", "stderr"]),
+  data: Schema.String,
+  nextCursor: NonNegativeInt,
+  end: Schema.Boolean,
+  truncated: Schema.Boolean,
+});
+export type AgentOutputPage = typeof AgentOutputPage.Type;
+
 export const WorkspaceStatus = Schema.Literals([
   "pending",
   "allocating",
@@ -407,6 +496,7 @@ export const WorkflowCreateRequest = Schema.Struct({
   requestedBy: TrimmedNonEmptyString,
   projectSnapshot: ResolvedProjectConfiguration,
   validationCheckId: Schema.optional(TrimmedNonEmptyString),
+  builder: Schema.optional(SingleBuilderRequest),
 });
 export type WorkflowCreateRequest = typeof WorkflowCreateRequest.Type;
 
@@ -428,6 +518,7 @@ export const WorkflowDetail = Schema.Struct({
   approvals: Schema.Array(Approval),
   artifacts: Schema.Array(Artifact),
   commands: Schema.Array(CommandRun),
+  agentRuns: Schema.Array(AgentRun),
   workspaces: Schema.Array(Workspace),
 });
 export type WorkflowDetail = typeof WorkflowDetail.Type;

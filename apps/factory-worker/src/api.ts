@@ -153,6 +153,7 @@ export function createFactoryApiServer(input: {
   readonly credential: string;
   readonly workerInstanceId: string;
   readonly outputStore?: CommandOutputStore;
+  readonly agentOutputStore?: CommandOutputStore;
   readonly onWorkflowCancelled?: (workflowRunId: string) => void;
 }): NodeHttp.Server {
   return NodeHttp.createServer((request, response) => {
@@ -289,6 +290,63 @@ export function createFactoryApiServer(input: {
         const command = input.engine.readCommand(decodeIdentifier(commandCancelMatch[1]));
         const detail = input.engine.cancelWorkflow(command.workflowRunId, body);
         input.onWorkflowCancelled?.(command.workflowRunId);
+        json(response, 200, detail);
+        return;
+      }
+
+      const agentMatch = /^\/v1\/agent-runs\/([^/]+)$/u.exec(url.pathname);
+      if (method === "GET" && agentMatch?.[1]) {
+        json(response, 200, input.engine.readAgentRun(decodeIdentifier(agentMatch[1])));
+        return;
+      }
+
+      const agentOutputMatch = /^\/v1\/agent-runs\/([^/]+)\/output$/u.exec(url.pathname);
+      if (method === "GET" && agentOutputMatch?.[1]) {
+        if (!input.agentOutputStore) {
+          throw new WorkflowEngineError("internal_error", "Agent output storage is unavailable.");
+        }
+        const agent = input.engine.readAgentRun(decodeIdentifier(agentOutputMatch[1]));
+        const stream = url.searchParams.get("stream");
+        if (stream !== "stdout" && stream !== "stderr") {
+          throw new WorkflowEngineError(
+            "invalid_request",
+            "Agent output stream must be stdout or stderr.",
+          );
+        }
+        const cursor = Number(url.searchParams.get("cursor") ?? "0");
+        const limit = Number(url.searchParams.get("limit") ?? "65536");
+        if (!Number.isSafeInteger(cursor) || cursor < 0 || !Number.isSafeInteger(limit)) {
+          throw new WorkflowEngineError("invalid_cursor", "Agent output cursor is invalid.");
+        }
+        const locationReference =
+          stream === "stdout" ? agent.stdoutArtifactReference : agent.stderrArtifactReference;
+        if (!locationReference)
+          throw new WorkflowEngineError("not_found", "Agent output is not available.");
+        let page;
+        try {
+          page = await input.agentOutputStore.readPage({ locationReference, cursor, limit });
+        } catch (cause) {
+          if (cause instanceof TypeError)
+            throw new WorkflowEngineError("invalid_request", cause.message);
+          if ((cause as NodeJS.ErrnoException).code === "ENOENT")
+            throw new WorkflowEngineError("not_found", "Agent output is not available.");
+          throw cause;
+        }
+        json(response, 200, {
+          agentRunId: agent.id,
+          stream,
+          ...page,
+          truncated: stream === "stdout" ? agent.stdoutTruncated : agent.stderrTruncated,
+        });
+        return;
+      }
+
+      const agentCancelMatch = /^\/v1\/agent-runs\/([^/]+)\/cancel$/u.exec(url.pathname);
+      if (method === "POST" && agentCancelMatch?.[1]) {
+        const body = decodeRequest(decodeCancel, await readJsonBody(request));
+        const agent = input.engine.readAgentRun(decodeIdentifier(agentCancelMatch[1]));
+        const detail = input.engine.cancelWorkflow(agent.workflowRunId, body);
+        input.onWorkflowCancelled?.(agent.workflowRunId);
         json(response, 200, detail);
         return;
       }

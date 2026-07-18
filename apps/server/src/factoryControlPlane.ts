@@ -1,4 +1,8 @@
-import type { WorkItemSource, WorkflowCreateResult } from "@mkcode/factory-contracts";
+import type {
+  SingleBuilderRequest,
+  WorkItemSource,
+  WorkflowCreateResult,
+} from "@mkcode/factory-contracts";
 import type { ProjectRegistrationError } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
@@ -35,6 +39,7 @@ export interface CreateRegisteredProjectWorkflowInput {
   readonly workflowType: string;
   readonly requestedBy: string;
   readonly validationCheckId?: string;
+  readonly builder?: SingleBuilderRequest;
 }
 
 export const createRegisteredProjectWorkflow = Effect.fn(
@@ -82,6 +87,7 @@ export const createRegisteredProjectWorkflow = Effect.fn(
         ...(input.validationCheckId === undefined
           ? {}
           : { validationCheckId: input.validationCheckId }),
+        ...(input.builder === undefined ? {} : { builder: input.builder }),
       }),
     catch: (cause) =>
       cause instanceof FactoryWorkerClientError && cause.status !== 504
