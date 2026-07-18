@@ -20,30 +20,51 @@ It also contains five built-in drivers in
 smaller: it retains session execution and canonical events while excluding UI
 settings, updater behavior, discovery presentation, and other server concerns.
 
-## AgentRuntime contract
+## Implemented AgentRuntime contract
 
-The conceptual interface is:
+The deliberately narrow first interface is:
 
 ```ts
 interface AgentRuntime {
-  start(input: RuntimeStartInput): Promise<RuntimeSession>;
-  resume(input: RuntimeResumeInput): Promise<RuntimeSession>;
-  send(sessionId: string, input: RuntimeInput): Promise<void>;
-  respondToApproval(
-    sessionId: string,
-    approvalId: string,
-    decision: ApprovalDecision,
-  ): Promise<void>;
-  respondToInput(sessionId: string, requestId: string, response: StructuredInput): Promise<void>;
-  interrupt(sessionId: string): Promise<void>;
-  stop(sessionId: string): Promise<void>;
-  events(sessionId: string, cursor?: string): AsyncIterable<RuntimeEvent>;
-  health(): Promise<RuntimeHealth>;
+  readonly kind: AgentRuntimeKind;
+  readonly capabilities: AgentRuntimeCapabilities;
+  outputReferences(executionId: string): OutputReferences;
+  start(input: StartAgentInput): Promise<StartedAgentSession>;
+  status(session: AgentSessionReference): Promise<AgentRuntimeStatus>;
+  wait(session: AgentSessionReference): Promise<AgentRuntimeCompletion>;
+  cancel(session: AgentSessionReference, reason: string): Promise<void>;
+  reconcile(session: AgentSessionReference): Promise<AgentReconciliationResult>;
+  events(session: AgentSessionReference, cursor?: number): Promise<AgentRuntimeEventPage>;
+  result(session: AgentSessionReference): Promise<AgentRuntimeCompletion | null>;
 }
 ```
 
-This task documents the interface only. Future implementation should bridge one
-existing adapter before generalizing all providers.
+`packages/agent-runtime/src/contracts.ts` implements this surface. Resume,
+repair-send, provider approval, and structured-input methods remain absent
+because the first adapter cannot support those workflow behaviors yet.
+
+### First adapter: Codex
+
+Repository inspection found both a typed Codex app-server seam for interactive
+sessions and the installed Codex CLI's structured `exec --json` mode. The first
+factory adapter selects the latter because it supplies a native session receipt,
+JSONL events, an output schema, explicit workspace-write sandbox and model
+selection, and a future resume seam without importing browser/thread state.
+It invokes direct arguments with `shell: false`, sends the prompt over stdin,
+and uses `--ignore-user-config` plus `--ignore-rules` so mutable user/repository
+prompting cannot replace factory rules.
+
+The initial child environment contains PATH, HOME/CODEX_HOME, temp, locale, and
+certificate variables only. The worker service credential is never inherited.
+HOME/CODEX_HOME are currently required for local Codex authentication; this is
+a trusted-operator limitation, not a general secret-isolation boundary.
+
+JSONL and stderr are normalized/redacted before bounded `0600` artifact writes.
+Agent-message content is retained only as the parsed structured result and
+hidden reasoning is not persisted. A durable completion receipt can reconcile a
+crash after native completion but before database confirmation. An uncertain
+local process cannot be safely reattached and becomes `operator_attention`; it
+is never blindly relaunched.
 
 ## Native and flexible runtimes
 
@@ -60,13 +81,11 @@ ignored.
 
 ## Session lifecycle
 
-- `start` creates a runtime session for an immutable AgentRun envelope.
-- `resume` uses persisted runtime/session identity and a known event cursor.
-- `send` supplies a bounded task or repair input.
-- approval and structured-input responses reference durable factory records.
-- `interrupt` requests graceful interruption; `stop` terminates the session.
-- `events` is cursor-based so reconnection can deduplicate and identify gaps.
-- `health` reports adapter/runtime readiness, not workflow success.
+- `start` creates one runtime session for an immutable AgentRun envelope.
+- `cancel` requests process-group interruption and bounded forced termination.
+- `events` and `result` expose normalized, bounded evidence.
+- `reconcile` consumes the native receipt and durable completion sidecar.
+- Resume/send/approval/structured input and repair messaging remain planned.
 
 Runtime sessions may be lost even while their processes remain. Reconciliation
 compares factory AgentRun state, saved runtime identity, ProcessHost status, and

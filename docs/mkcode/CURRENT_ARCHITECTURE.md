@@ -2,7 +2,7 @@
 
 This document describes the verified T3-derived architecture plus landed MK Code
 fork-safety, project-registration, factory-worker, and deterministic-command
-additions. The fixed derivation baseline is
+additions, including the first single-builder runtime. The fixed derivation baseline is
 `ecb35f75839925dd1ac6f854efeef5c9e291d11b`; current code has advanced beyond
 that commit. Planned factory components are documented separately.
 
@@ -32,6 +32,8 @@ flowchart LR
     Server --> Tailscale[Tailscale Serve]
     Server -->|authenticated loopback HTTP| Worker[apps/factory-worker]
     Worker --> Engine[packages/workflow-engine]
+    Worker --> AgentRuntime[packages/agent-runtime]
+    AgentRuntime -->|codex exec --json| CodexFactory[One factory Codex session]
     Engine --> FactorySQLite[(Separate factory.sqlite)]
     Web & Mobile & Desktop --> Relay[T3 Connect / infra/relay]
     Relay --> Cloud[Clerk, Cloudflare, PlanetScale, Axiom, APNs]
@@ -403,6 +405,37 @@ selected check. Human review, approval, rejection, and operator attention retain
 the worktree. Terminal runs expose an authenticated, ID-only cleanup request;
 cleanup uses `git worktree remove` without force and retains the branch.
 
+### Single-builder runtime
+
+Migration 4 adds the `agent_runs` table and the workflow builder-request column;
+it does not create rows for existing workflows. When a workflow contains the
+bounded built-in builder contract, workspace readiness creates its one agent
+row, a `building` stage, and an `agent.execute` JobIntent. The worker validates a
+versioned task envelope, proves workspace ownership, records pre-run Git
+evidence, and launches `CodexAgentRuntime` from
+`packages/agent-runtime/src/codexRuntime.ts` in the canonical worktree. The
+adapter invokes `codex exec --json` directly through `LocalProcessHost`; it does
+not create an interactive thread or pass through browser WebSocket turns.
+
+The task prompt is composed in explicit global, role, immutable task, project
+context, repository-evidence, and runtime-specific layers
+(`packages/agent-runtime/src/prompt.ts`). Output is normalized, bounded, and
+redacted before file persistence under factory-owned `agent-output/`. The
+worker records post-run HEAD, branch, changed/untracked paths, Git-local config
+digest, and ownership digest using
+`packages/workspace-manager/src/workspaceManager.ts`. A commit, branch change,
+Git-config change, forbidden/out-of-scope path, escaping symlink, or ownership
+mismatch routes the run to `operator_attention` and retains the worktree.
+
+Only a clean policy result schedules the immutable declared validation check.
+Codex's summary and claimed test results are informative; the command exit code
+still decides validation. The authenticated worker API exposes bounded
+AgentRun status/output/cancellation routes, while workflow creation accepts
+only the built-in semantic role fields—not arbitrary prompts, executables,
+working directories, or provider credentials. Server transport lives in
+`apps/server/src/factoryWorkerClient.ts` and the bounded registered-project
+request is assembled by `apps/server/src/factoryControlPlane.ts`.
+
 ## Git, worktrees, checkpoints, terminals, and previews
 
 The factory path is now separate from the interactive VCS path.
@@ -535,11 +568,18 @@ review item, not a finding of noncompliance.
     machine loss, a starting/running command whose identity cannot be proven is
     marked `operator_attention`; native PID metadata is not sufficient for safe
     reattachment.
+13. The first factory runtime uses the locally authenticated Codex CLI and its
+    host HOME/CODEX_HOME. The workspace-write sandbox narrows writes, but this
+    is trusted-operator containment rather than a strong host security boundary.
+14. A running local Codex process cannot be safely reattached after worker or
+    machine loss unless a durable completion receipt proves it finished.
+    Ambiguous starts/runs become `operator_attention`; they are never relaunched.
 
 ## Unverified areas
 
 - Authenticated end-to-end sessions against real Claude Code, Codex, Cursor,
-  Grok, and OpenCode installations.
+  Grok, and OpenCode installations in the interactive domain. The factory
+  single-builder Codex path is verified locally against Codex CLI 0.144.5.
 - Browser E2E behavior; the default web tests run in a Node unit environment.
 - Meaningful native mobile lint without SwiftLint, ktlint, and detekt.
 - Signed cross-platform desktop installers.

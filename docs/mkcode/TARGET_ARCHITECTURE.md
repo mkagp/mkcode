@@ -8,9 +8,10 @@ the only public control plane. The factory worker exclusively owns separate
 factory persistence and exposes a narrow authenticated loopback API and resumable
 event feed.
 
-The persistence/API skeleton, deterministic local command path, and Git
-worktree Workspace implementation of this target are now implemented. Agent
-runtime adapters, registries, integrations, stronger sandboxes, and browser
+The persistence/API skeleton, deterministic local command path, Git worktree
+Workspace, provider-neutral `AgentRuntime`, and one Codex-backed
+`single-builder` implementation are now implemented. Multiple runtime adapters,
+registries, repair routing, integrations, stronger sandboxes, and browser
 workflow views remain target components.
 
 This approach reuses proven provider, event, Git, auth, and connection patterns
@@ -113,8 +114,10 @@ jobs and reconciles state before accepting new work after restart.
 loopback API, credential check, polling simulation loop, startup reconciliation,
 graceful shutdown, and one declared-check execution handler. Process launch is
 delegated to `packages/command-runner`; Git effects are delegated to
-`packages/workspace-manager`. The worker still contains no coding agent,
-provider, Herdr, or integration launcher.
+`packages/workspace-manager`. It now composes one provider-neutral
+`AgentRuntime` with the Codex single-builder adapter, but it contains no
+multi-agent/delegation system, generalized provider launcher, Herdr host, or
+external-integration launcher.
 
 ### Durable workflow engine
 

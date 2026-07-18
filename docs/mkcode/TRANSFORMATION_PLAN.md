@@ -31,7 +31,11 @@ without separate explicit direction.
   6: additive Workspace persistence, immutable base resolution, factory-owned
   branches/worktrees, ownership evidence, retention, safe cleanup, restart
   reconciliation, and command execution in the worktree.
-- **Phases 2–3, the single-builder remainder of Phase 6, and 7–13:** not started.
+- **Single-builder vertical slice:** implemented as the final bounded part of
+  Phase 6: provider-neutral AgentRuntime, one Codex adapter, durable AgentRun,
+  worktree policy evidence, deterministic validation, review, and restart-safe
+  evidence.
+- **Phases 2–3 and 7–13:** not started.
 
 ## Phase 0: Land the audit documentation
 
@@ -153,21 +157,20 @@ without separate explicit direction.
   covered by `apps/factory-worker/src/runtime.test.ts`; server ownership is
   limited to `apps/server/src/factoryWorkerClient.ts`.
 
-## Phase 6: Prove the first vertical workflow — command foundation implemented
+## Phase 6: Prove the first vertical workflow — implemented
 
 - **Goal:** exercise the smallest valuable durable path end to end.
 - **Prerequisites:** worker skeleton and one project config/profile are complete.
-  LocalProcessHost, deterministic command execution, and worker-owned worktree
-  allocation are now complete; one bridged single-builder AgentRuntime remains.
+  LocalProcessHost, deterministic command execution, worker-owned worktree
+  allocation, and one single-builder AgentRuntime are complete.
 - **Affected:** worker stage handlers, runtime/process ports, VCS/worktree bridge,
   minimal server API/view.
-- **Target/future flow:** manual task → allocate worktree → launch one builder →
-  run one configured lint command → on failure send recorded output to the same
-  builder once → rerun lint → stop at durable human review. The currently
-  implemented subset is command-only and does not launch a builder or repair
-  failures.
+- **Implemented flow:** manual WorkItem → allocate worktree → launch one Codex
+  builder → inspect Git policy evidence → run one declared check → stop at
+  durable human review. Failure repair remains Phase 7.
 - **Deliverables:** restart-safe run with immutable snapshot, owned workspace,
-  AgentRun, CommandRuns, artifacts, one capped repair, durable approval.
+  AgentRun, CommandRuns, artifacts, and durable approval. One capped repair is a
+  planned Phase 7 deliverable, not part of Phase 6.
 - **Verification:** happy path; lint failure/repair; retry exhaustion; cancellation;
   duplicate job; worker crash before/after process start; approval across restart;
   cleanup recovery.
@@ -186,10 +189,16 @@ without separate explicit direction.
   selected check there, retain at review/terminal outcomes, reconcile after
   restart, and remove only clean proven ownership through explicit cleanup.
   Branch deletion, commits, pushes, and force cleanup remain excluded.
-- **Next exact slice:** bridge one existing coding runtime as a single builder in
-  the owned worktree with a bounded structured task/result contract. Do not add
-  multi-agent teams, generalized workflows, Herdr, publication, automatic
-  commits, or automatic repair loops in that slice.
+- **Implemented builder subset:** migration 4 owns exactly one AgentRun and an
+  immutable task/runtime snapshot. Runtime completion never determines success;
+  policy inspection gates the declared check and its exit status gates review.
+  Cancellation/timeout stop the local process group, ambiguous restart state is
+  operator attention, and no interactive thread, commit, push, or repair occurs.
+- **Next exact slice:** add one capped repair message to the same native builder
+  session after deterministic validation failure, then expand the opinionated
+  stage sequence only as far as scout, plan, validate, independent review, and
+  durable approval. Do not introduce generalized registries/graphs, delegation,
+  Herdr, or publication.
 
 ## Phase 7: Expand the workflow
 
@@ -321,12 +330,14 @@ without separate explicit direction.
 
 ## Ordering rule
 
-Phase 5 proved the transaction, lease, restart, approval, cancellation, and
-event-replay boundary without execution. The next factory product-code task is
-Phase 6's single vertical slice only. It must introduce the smallest explicit
-ProcessHost, workspace ownership, one runtime bridge, and one deterministic lint
-command, then stop at human review.
+Phases 5 and 6 now prove durable transactions, local process execution,
+factory-owned worktrees, one provider-neutral builder, deterministic validation,
+approval, cancellation, recovery, and event replay. The next factory task is a
+narrow first part of Phase 7: return one deterministic failure artifact to the
+same builder session with a capped attempt, rerun the same check, and retain all
+attempt-specific evidence. Only after that seam is proven should scout, plan,
+independent review, and additional declared checks be sequenced.
 
 Phase 2 display branding and Phase 3 product-surface freezing remain independent
-tracks. Do not combine either with Phase 6, and do not generalize teams,
+tracks. Do not combine either with Phase 7, and do not generalize teams,
 registries, or a workflow language until the vertical slice supplies evidence.

@@ -16,6 +16,24 @@ schemas, and permission boundaries. An AgentRun is one concrete execution under
 a resolved ExecutionProfile. TeamDefinition composes roles and delegation
 limits; WorkflowDefinition decides when those roles act.
 
+## Implemented single-builder scaffold
+
+The first factory agent deliberately precedes the generalized registries. It
+uses one built-in semantic role, `single-builder`, with a versioned task envelope
+containing objective, WorkItem text, acceptance criteria, allowed/forbidden
+paths, owned-worktree reference, project context references, validation-check
+ID, maximum runtime, cancellation policy, and structured-result requirement.
+The runtime kind/model are stored separately in a narrow runtime-configuration
+snapshot. This separation is temporary scaffolding for future versioned
+AgentDefinition and ExecutionProfile records; it must not become a second ad hoc
+registry.
+
+There is exactly one AgentRun, no delegation depth, and no native subagents.
+The result envelope records the runtime session, summary, claimed paths/tests,
+unresolved issues, questions, and completion reason, but none of those claims
+can mark validation successful. Post-run Git policy inspection gates the
+controller-owned declared check.
+
 ## Responsibilities
 
 ### Orchestrator

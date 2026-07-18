@@ -215,6 +215,34 @@ draining after truncation, records observed/persisted counts and SHA-256, and is
 returned in authenticated pages capped at 64 KiB. This reduces accidental
 secret retention but is not complete data-loss prevention.
 
+### Single-builder containment
+
+The builder contract accepts a bounded WorkItem, semantic single-builder
+fields, declared validation-check ID, and runtime selection. It does not accept
+an arbitrary system prompt, executable, argument vector, shell string,
+repository/worktree path, or provider credential. The engine constructs and
+digests the task envelope only after the factory-owned Workspace is ready.
+
+Immediately before launch, the worker proves the administrative ownership
+marker, Git common-directory, branch, HEAD, and canonical worktree. Codex runs
+with that worktree as its working directory and workspace-write sandbox. A
+bounded preflight walks existing worktree entries without following symlinks
+and rejects unresolved or externally resolving links before launch. Post-run
+inspection derives tracked and untracked paths from one stable porcelain-status
+snapshot and rejects commits/HEAD changes, branch changes, Git-local
+configuration changes, changed ownership evidence, forbidden/out-of-scope
+paths, and new or changed symlink escapes. Violations retain the workspace for
+operator attention and prevent validation. This is policy and isolation, not a
+complete sandbox or protection from runtime/kernel defects and filesystem
+TOCTOU races.
+
+The factory credential is excluded from the minimal child environment and is
+also registered as a redaction value. Normalized JSONL, stderr, and the result
+envelope are redacted before `0600` artifact or SQLite persistence; raw provider
+output is not written first. The first adapter currently needs HOME/CODEX_HOME
+for local Codex authentication, so it remains a trusted-operator deployment and
+a dedicated OS identity is recommended.
+
 ## Integrations and Herdr
 
 - Herdr process attachment can expose raw repository content, prompts, secrets,

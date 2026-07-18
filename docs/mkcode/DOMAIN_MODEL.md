@@ -3,9 +3,10 @@
 This document defines the factory domain. The current factory phases implement the minimal
 WorkItem, WorkflowRun, StageRun, Attempt, JobIntent/Lease, IdempotencyRecord,
 Approval, Artifact metadata, WorkflowEvent, and CommandRun subset needed by the
-fixed simulation plus one deterministic validating check. ProjectDefinition,
-definitions, agent/workspace runs, and
-external links remain planned unless explicitly stated otherwise.
+fixed simulation, one deterministic validating check, one factory Workspace,
+and one built-in single-builder AgentRun. Generalized project/agent/team/
+workflow/profile definitions and external links remain planned unless explicitly
+stated otherwise.
 
 ## Domain boundary
 
@@ -167,12 +168,25 @@ erDiagram
 
 ### AgentRun
 
-- **Purpose:** one execution of an AgentDefinition for an Attempt.
+- **Purpose:** one concrete semantic assignment executed by one runtime adapter.
 - **Identity:** stable AgentRun ID.
-- **Lifecycle:** queued, starting, running, awaiting-input, stopped, succeeded,
-  failed, cancelled, lost.
-- **Relationships:** runtime session, hosted process, input/output artifacts.
-- **Prohibited:** directly launching child agents; it may request delegation.
+- **Lifecycle:** pending → starting → running → completed, with
+  cancel_requested, cancelled, failed, timed_out, blocked, and
+  operator_attention states.
+- **Relationships:** WorkflowRun, building StageRun/Attempt, owned Workspace,
+  immutable task/runtime snapshots, native runtime session, bounded output, and
+  pre/post Git evidence.
+- **Source of truth:** factory migration 4 and `WorkflowEngine`; provider session
+  state and the result envelope are evidence only.
+- **Mutable versus snapshotted:** semantic role, runtime configuration, task
+  envelope, digest, workspace, and validation-check reference are immutable at
+  launch. Lifecycle, normalized output metadata, result, and Git evidence evolve.
+- **Prohibited:** credentials, raw chain of thought, arbitrary browser prompts or
+  processes, child agents, commits/pushes, validation success claims, or blind
+  restart relaunch.
+- **Implemented subset:** exactly one built-in `single-builder` role using the
+  provider-neutral `AgentRuntime` contract and `CodexAgentRuntime`. Versioned
+  registries and repair/resume messaging remain deferred.
 
 ### CommandRun
 
