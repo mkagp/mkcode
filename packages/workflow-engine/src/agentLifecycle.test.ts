@@ -6,6 +6,7 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
 import { afterEach, describe, it } from "@effect/vitest";
+import { SingleBuilderRequestLimits } from "@mkcode/factory-contracts";
 
 import { makeCreateRequest, makeProjectSnapshot } from "./testFixtures.ts";
 import { WorkflowEngine } from "./workflowEngine.ts";
@@ -96,10 +97,19 @@ const allocate = (engine: WorkflowEngine, root: string) => {
 const completion = (agentRunId: string, violations: ReadonlyArray<string> = []) => ({
   outcome: "completed" as const,
   resultEnvelope: {
-    version: 1,
+    version: 1 as const,
     agentRunId,
     runtimeSessionReference: "session",
+    status: "completed" as const,
     summary: "done",
+    claimedChangedPaths: ["src/result.txt"],
+    claimedTestsChanged: [],
+    unresolvedIssues: [],
+    questionsOrBlockers: [],
+    runtimeCompletionReason: "turn_completed",
+    nativeSessionMetadata: { runtime: "codex" },
+    startedAt: "2026-07-17T00:00:01.000Z",
+    completedAt: "2026-07-17T00:00:02.000Z",
   },
   completionReason: "turn_completed",
   stdout: {
@@ -152,6 +162,35 @@ describe("durable single-builder AgentRun", () => {
           builder: {
             objective: "build",
             acceptanceCriteria: [" "],
+            allowedPaths: ["src/**"],
+            runtime: { kind: "codex", maximumRuntimeSeconds: 60 },
+          },
+        }),
+      /single-builder request is invalid/u,
+    );
+    NodeAssert.throws(
+      () =>
+        engine.createWorkflow({
+          ...base,
+          builder: {
+            objective: "x".repeat(SingleBuilderRequestLimits.objectiveCharacters + 1),
+            acceptanceCriteria: ["done"],
+            allowedPaths: ["src/**"],
+            runtime: { kind: "codex", maximumRuntimeSeconds: 60 },
+          },
+        }),
+      /single-builder request is invalid/u,
+    );
+    NodeAssert.throws(
+      () =>
+        engine.createWorkflow({
+          ...base,
+          builder: {
+            objective: "build",
+            acceptanceCriteria: Array.from(
+              { length: SingleBuilderRequestLimits.acceptanceCriteria + 1 },
+              () => "done",
+            ),
             allowedPaths: ["src/**"],
             runtime: { kind: "codex", maximumRuntimeSeconds: 60 },
           },
@@ -268,6 +307,20 @@ describe("durable single-builder AgentRun", () => {
         }),
       /lost its durable fence/u,
     );
+    NodeAssert.throws(
+      () =>
+        engine.completeAgent({
+          agentRunId: agent.id,
+          jobId: claimed.job.id,
+          leaseOwner: "worker",
+          expectedStageVersion: claimed.stageVersion,
+          evidence: {
+            ...completion(agent.id),
+            resultEnvelope: { ...completion(agent.id).resultEnvelope, status: "failed" },
+          },
+        }),
+      /contradicts its outcome/u,
+    );
     const completed = engine.completeAgent({
       agentRunId: agent.id,
       jobId: claimed.job.id,
@@ -365,7 +418,11 @@ describe("durable single-builder AgentRun", () => {
       jobId: claimed.job.id,
       leaseOwner: "worker",
       expectedStageVersion: claimed.stageVersion,
-      evidence: { ...completion(agent.id), outcome: "blocked" as const },
+      evidence: {
+        ...completion(agent.id),
+        outcome: "blocked" as const,
+        resultEnvelope: { ...completion(agent.id).resultEnvelope, status: "blocked" as const },
+      },
     });
     NodeAssert.equal(blocked.agentRuns[0]?.status, "blocked");
     NodeAssert.throws(

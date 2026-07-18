@@ -82,6 +82,8 @@ ignored.
 ## Session lifecycle
 
 - `start` creates one runtime session for an immutable AgentRun envelope.
+- `status` reports the current runtime session state.
+- `wait` resolves the runtime completion.
 - `cancel` requests process-group interruption and bounded forced termination.
 - `events` and `result` expose normalized, bounded evidence.
 - `reconcile` consumes the native receipt and durable completion sidecar.

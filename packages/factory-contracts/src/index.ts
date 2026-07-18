@@ -10,6 +10,50 @@ const NonNegativeInt = Schema.Int.check(Schema.isGreaterThanOrEqualTo(0));
 const PositiveInt = Schema.Int.check(Schema.isGreaterThanOrEqualTo(1));
 const TrimmedNonEmptyString = Schema.Trimmed.check(Schema.isMinLength(1));
 
+export const SingleBuilderRequestLimits = {
+  objectiveCharacters: 16_384,
+  acceptanceCriteria: 64,
+  acceptanceCriterionCharacters: 4_096,
+  scopePaths: 256,
+  scopePathCharacters: 512,
+  modelCharacters: 128,
+} as const;
+
+export const BuilderRuntimeRequest = Schema.Struct({
+  kind: Schema.Literal("codex"),
+  model: Schema.optional(
+    TrimmedNonEmptyString.check(Schema.isMaxLength(SingleBuilderRequestLimits.modelCharacters)),
+  ),
+  maximumRuntimeSeconds: PositiveInt,
+});
+export type BuilderRuntimeRequest = typeof BuilderRuntimeRequest.Type;
+
+const BuilderCriterion = TrimmedNonEmptyString.check(
+  Schema.isMaxLength(SingleBuilderRequestLimits.acceptanceCriterionCharacters),
+);
+const BuilderScopePath = TrimmedNonEmptyString.check(
+  Schema.isMaxLength(SingleBuilderRequestLimits.scopePathCharacters),
+);
+
+export const SingleBuilderRequest = Schema.Struct({
+  objective: TrimmedNonEmptyString.check(
+    Schema.isMaxLength(SingleBuilderRequestLimits.objectiveCharacters),
+  ),
+  acceptanceCriteria: Schema.Array(BuilderCriterion).check(
+    Schema.isMinLength(1),
+    Schema.isMaxLength(SingleBuilderRequestLimits.acceptanceCriteria),
+  ),
+  allowedPaths: Schema.Array(BuilderScopePath).check(
+    Schema.isMinLength(1),
+    Schema.isMaxLength(SingleBuilderRequestLimits.scopePaths),
+  ),
+  forbiddenPaths: Schema.optional(
+    Schema.Array(BuilderScopePath).check(Schema.isMaxLength(SingleBuilderRequestLimits.scopePaths)),
+  ),
+  runtime: BuilderRuntimeRequest,
+});
+export type SingleBuilderRequest = typeof SingleBuilderRequest.Type;
+
 export const WorkItemSource = Schema.Literals(["manual", "conversation", "integration"]);
 export type WorkItemSource = typeof WorkItemSource.Type;
 
@@ -64,7 +108,7 @@ export const WorkflowRun = Schema.Struct({
   cancellationRequestedBy: Schema.optional(Schema.String),
   terminalOutcome: Schema.optional(WorkflowTerminalOutcome),
   validationCheckId: Schema.optional(Schema.String),
-  builderRequest: Schema.optional(Schema.Record(Schema.String, Schema.Unknown)),
+  builderRequest: Schema.optional(SingleBuilderRequest),
   version: NonNegativeInt,
 });
 export type WorkflowRun = typeof WorkflowRun.Type;
@@ -330,22 +374,6 @@ export const CommandOutputPage = Schema.Struct({
   truncated: Schema.Boolean,
 });
 export type CommandOutputPage = typeof CommandOutputPage.Type;
-
-export const BuilderRuntimeRequest = Schema.Struct({
-  kind: Schema.Literal("codex"),
-  model: Schema.optional(TrimmedNonEmptyString),
-  maximumRuntimeSeconds: PositiveInt,
-});
-export type BuilderRuntimeRequest = typeof BuilderRuntimeRequest.Type;
-
-export const SingleBuilderRequest = Schema.Struct({
-  objective: TrimmedNonEmptyString,
-  acceptanceCriteria: Schema.Array(TrimmedNonEmptyString).check(Schema.isMinLength(1)),
-  allowedPaths: Schema.Array(TrimmedNonEmptyString).check(Schema.isMinLength(1)),
-  forbiddenPaths: Schema.optional(Schema.Array(TrimmedNonEmptyString)),
-  runtime: BuilderRuntimeRequest,
-});
-export type SingleBuilderRequest = typeof SingleBuilderRequest.Type;
 
 export const AgentRunStatus = Schema.Literals([
   "pending",

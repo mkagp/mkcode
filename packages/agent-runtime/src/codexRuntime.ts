@@ -35,6 +35,7 @@ import { validateBuilderTaskEnvelope } from "./taskEnvelope.ts";
 const MODEL = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/u;
 const START_TIMEOUT_MILLISECONDS = 15_000;
 const TERMINATION_GRACE_MILLISECONDS = 2_000;
+const POST_TERMINATION_WAIT_MILLISECONDS = 5_000;
 const MAX_EVENT_BUFFER_BYTES = 1_048_576;
 const MAX_RETAINED_EVENT_BYTES = 262_144;
 const MAX_RETAINED_EVENT_COUNT = 2_048;
@@ -233,19 +234,33 @@ const isOutputArtifact = (value: unknown): boolean => {
 const isRuntimeCompletion = (value: unknown): value is AgentRuntimeCompletion => {
   const completion = asObject(value);
   const result = asObject(completion?.result);
+  const nativeSessionMetadata = asObject(result?.nativeSessionMetadata);
+  const outcome = String(completion?.outcome);
   return (
     completion !== undefined &&
-    ["completed", "failed", "cancelled", "timed_out", "blocked"].includes(
-      String(completion.outcome),
-    ) &&
+    ["completed", "failed", "cancelled", "timed_out", "blocked"].includes(outcome) &&
     (completion.exitCode === null || typeof completion.exitCode === "number") &&
     (completion.signal === null || typeof completion.signal === "string") &&
     result !== undefined &&
     result.version === 1 &&
     typeof result.agentRunId === "string" &&
+    result.agentRunId.length > 0 &&
     typeof result.runtimeSessionReference === "string" &&
-    typeof result.status === "string" &&
+    result.runtimeSessionReference.length > 0 &&
+    result.status === outcome &&
     typeof result.summary === "string" &&
+    isStringArray(result.claimedChangedPaths) &&
+    isStringArray(result.claimedTestsChanged) &&
+    isStringArray(result.unresolvedIssues) &&
+    isStringArray(result.questionsOrBlockers) &&
+    typeof result.runtimeCompletionReason === "string" &&
+    result.runtimeCompletionReason.length > 0 &&
+    nativeSessionMetadata !== undefined &&
+    Object.values(nativeSessionMetadata).every((item) => typeof item === "string") &&
+    typeof result.startedAt === "string" &&
+    result.startedAt.length > 0 &&
+    typeof result.completedAt === "string" &&
+    result.completedAt.length > 0 &&
     isOutputArtifact(completion.stdout) &&
     isOutputArtifact(completion.stderr)
   );
@@ -738,10 +753,21 @@ export class CodexAgentRuntime implements AgentRuntime {
     record.stopReason ??= reason;
     await this.#host.interrupt(record.input.executionId);
     const finished = await Promise.race([
-      record.completion?.then(() => true) ?? Promise.resolve(false),
+      record.hosted.completion.then(() => true),
       delay(TERMINATION_GRACE_MILLISECONDS).then(() => false),
     ]);
-    if (!finished) await this.#host.terminate(record.input.executionId);
+    if (finished) return;
+    await this.#host.terminate(record.input.executionId);
+    const terminated = await Promise.race([
+      record.hosted.completion.then(() => true),
+      delay(POST_TERMINATION_WAIT_MILLISECONDS).then(() => false),
+    ]);
+    if (!terminated) {
+      throw new AgentRuntimeError(
+        "runtime_ambiguous",
+        "Codex process exit could not be confirmed after forced termination.",
+      );
+    }
   }
 
   #completionPath(executionId: string): string {

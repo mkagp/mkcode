@@ -137,7 +137,8 @@ describe("DeterministicCommandRunner", () => {
       environment: { PATH: NodeProcess.env.PATH ?? "" },
       stdin: "x".repeat(1_048_576),
     });
-    await expect(process.completion).resolves.toMatchObject({ exitCode: 0 });
+    await process.completion;
+    await expect(host.status("closed-stdin")).resolves.toEqual({ state: "unknown" });
   });
 
   it("pages persisted output only on UTF-8 character boundaries", async () => {

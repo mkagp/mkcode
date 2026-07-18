@@ -171,7 +171,7 @@ without separate explicit direction.
 - **Deliverables:** restart-safe run with immutable snapshot, owned workspace,
   AgentRun, CommandRuns, artifacts, and durable approval. One capped repair is a
   planned Phase 7 deliverable, not part of Phase 6.
-- **Verification:** happy path; lint failure/repair; retry exhaustion; cancellation;
+- **Verification:** happy path; terminal validation-failure routing; retry exhaustion; cancellation;
   duplicate job; worker crash before/after process start; approval across restart;
   cleanup recovery.
 - **Risks:** over-generalizing before observing real needs; destructive worktree

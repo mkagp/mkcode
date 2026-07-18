@@ -219,32 +219,7 @@ export class AgentExecutionWorker {
       this.#engine.markAgentOperatorAttention(agent.id, "workspace_evidence_incomplete");
       return;
     }
-    let task: BuilderTaskEnvelope;
-    let before: WorkspaceGitEvidence;
-    try {
-      task = validateBuilderTaskEnvelope(agent.taskEnvelope as unknown as BuilderTaskEnvelope);
-      before = await this.#workspaceManager.captureGitEvidence(inspectInput);
-      await assertWorkspaceSymlinkContainment(workspace.canonicalWorktreePath!);
-    } catch {
-      this.#engine.markAgentOperatorAttention(agent.id, "workspace_preflight_failed");
-      return;
-    }
-    const executionId = NodeCrypto.randomUUID();
-    const references = this.#runtime.outputReferences(executionId);
-    let current = this.#engine.startAgent({
-      agentRunId: agent.id,
-      jobId: claimed.job.id,
-      leaseOwner: this.#workerInstanceId,
-      attemptId: claimed.attempt.id,
-      expectedStageVersion: claimed.stageVersion,
-      evidence: {
-        processHostExecutionId: executionId,
-        stdoutArtifactReference: references.stdout,
-        stderrArtifactReference: references.stderr,
-        preGitEvidence: toRecord(before),
-      },
-    });
-    let renewal: ReturnType<typeof NodeTimers.setInterval> | undefined;
+    let renewal: ReturnType<typeof NodeTimers.setInterval>;
     let renewalFailed = false;
     let startedSession: AgentSessionReference | undefined;
     renewal = NodeTimers.setInterval(
@@ -262,6 +237,34 @@ export class AgentExecutionWorker {
     );
     renewal.unref();
     try {
+      let task: BuilderTaskEnvelope;
+      let before: WorkspaceGitEvidence;
+      try {
+        task = validateBuilderTaskEnvelope(agent.taskEnvelope as unknown as BuilderTaskEnvelope);
+        before = await this.#workspaceManager.captureGitEvidence(inspectInput);
+        await assertWorkspaceSymlinkContainment(workspace.canonicalWorktreePath!);
+      } catch {
+        this.#engine.markAgentOperatorAttention(agent.id, "workspace_preflight_failed");
+        return;
+      }
+      if (renewalFailed) {
+        throw new AgentRuntimeError("runtime_ambiguous", "Agent preflight lost its durable lease.");
+      }
+      const executionId = NodeCrypto.randomUUID();
+      const references = this.#runtime.outputReferences(executionId);
+      let current = this.#engine.startAgent({
+        agentRunId: agent.id,
+        jobId: claimed.job.id,
+        leaseOwner: this.#workerInstanceId,
+        attemptId: claimed.attempt.id,
+        expectedStageVersion: claimed.stageVersion,
+        evidence: {
+          processHostExecutionId: executionId,
+          stdoutArtifactReference: references.stdout,
+          stderrArtifactReference: references.stderr,
+          preGitEvidence: toRecord(before),
+        },
+      });
       const projectContext = await loadContext(
         workspace.canonicalWorktreePath!,
         task.contextFileReferences,
@@ -288,10 +291,6 @@ export class AgentExecutionWorker {
       if (renewalFailed) {
         await this.#runtime.cancel(started.session, "lease_lost");
         throw new AgentRuntimeError("runtime_ambiguous", "Agent startup lost its durable lease.");
-      }
-      if (this.#stopping) {
-        await this.#runtime.cancel(started.session, "worker_shutdown");
-        return;
       }
       const durableAfterStart = this.#engine.readAgentRun(agent.id);
       if (
@@ -345,6 +344,10 @@ export class AgentExecutionWorker {
         );
         return;
       }
+      if (this.#stopping) {
+        await this.#runtime.cancel(started.session, "worker_shutdown");
+        return;
+      }
       const completion = await this.#runtime.wait(started.session);
       if (this.#stopping || renewalFailed) return;
       await this.#persistCompletion(
@@ -377,7 +380,7 @@ export class AgentExecutionWorker {
         this.#engine.markAgentOperatorAttention(agent.id, "runtime_launch_or_monitoring_ambiguous");
       }
     } finally {
-      if (renewal) NodeTimers.clearInterval(renewal);
+      NodeTimers.clearInterval(renewal);
       this.#active.delete(agent.workflowRunId);
     }
   }

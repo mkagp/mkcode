@@ -50,6 +50,10 @@ describe("agent workspace policy", () => {
       await NodeFSP.writeFile(NodePath.join(outside, "created.txt"), "outside", "utf8");
       await NodeFSP.symlink(NodePath.join(outside, "secret"), NodePath.join(root, "src", "link"));
       await NodeFSP.symlink(outside, NodePath.join(root, "src", "external"));
+      await NodeFSP.symlink(
+        NodePath.join(outside, "missing"),
+        NodePath.join(root, "src", "dangling"),
+      );
       const before = evidence([]);
       NodeAssert.deepEqual(
         (
@@ -63,7 +67,12 @@ describe("agent workspace policy", () => {
         [],
       );
       const after = {
-        ...evidence([".mkcode/project.yaml", "src/external/created.txt", "src/link"]),
+        ...evidence([
+          ".mkcode/project.yaml",
+          "src/dangling",
+          "src/external/created.txt",
+          "src/link",
+        ]),
         head: "b".repeat(40),
         branch: "other",
         localConfigurationDigest: "changed",
@@ -80,6 +89,7 @@ describe("agent workspace policy", () => {
       NodeAssert.ok(result.violations.includes("forbidden_path:.mkcode/project.yaml"));
       NodeAssert.ok(result.violations.includes("symlink_escape:src/external/created.txt"));
       NodeAssert.ok(result.violations.includes("symlink_escape:src/link"));
+      NodeAssert.ok(result.violations.includes("symlink_escape:src/dangling"));
     } finally {
       await NodeFSP.rm(root, { recursive: true });
       await NodeFSP.rm(outside, { recursive: true });

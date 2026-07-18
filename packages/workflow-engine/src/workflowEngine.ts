@@ -20,6 +20,7 @@ import {
   type StageKey,
   type StageRun,
   type SingleBuilderRequest,
+  SingleBuilderRequestLimits,
   type WorkflowCancelRequest,
   type WorkflowCreateRequest,
   type WorkflowCreateResult,
@@ -131,7 +132,21 @@ export interface AgentStartedEvidence {
 
 export interface AgentCompletionEvidence {
   readonly outcome: "completed" | "failed" | "cancelled" | "timed_out" | "blocked";
-  readonly resultEnvelope: Readonly<Record<string, unknown>>;
+  readonly resultEnvelope: {
+    readonly version: 1;
+    readonly agentRunId: string;
+    readonly runtimeSessionReference: string;
+    readonly status: "completed" | "failed" | "cancelled" | "timed_out" | "blocked";
+    readonly summary: string;
+    readonly claimedChangedPaths: ReadonlyArray<string>;
+    readonly claimedTestsChanged: ReadonlyArray<string>;
+    readonly unresolvedIssues: ReadonlyArray<string>;
+    readonly questionsOrBlockers: ReadonlyArray<string>;
+    readonly runtimeCompletionReason: string;
+    readonly nativeSessionMetadata: Readonly<Record<string, string>>;
+    readonly startedAt: string;
+    readonly completedAt: string;
+  };
   readonly completionReason: string;
   readonly stdout: {
     readonly locationReference: string;
@@ -150,6 +165,32 @@ export interface AgentCompletionEvidence {
   readonly postGitEvidence: Readonly<Record<string, unknown>>;
   readonly policyViolations: ReadonlyArray<string>;
 }
+
+const assertAgentCompletionEvidence = (evidence: AgentCompletionEvidence): void => {
+  const result = evidence.resultEnvelope;
+  if (
+    result.version !== 1 ||
+    result.agentRunId.trim().length === 0 ||
+    result.runtimeSessionReference.trim().length === 0 ||
+    result.status !== evidence.outcome ||
+    result.summary.trim().length === 0 ||
+    ![
+      result.claimedChangedPaths,
+      result.claimedTestsChanged,
+      result.unresolvedIssues,
+      result.questionsOrBlockers,
+    ].every((items) => Array.isArray(items) && items.every((item) => typeof item === "string")) ||
+    result.runtimeCompletionReason.trim().length === 0 ||
+    result.startedAt.trim().length === 0 ||
+    result.completedAt.trim().length === 0 ||
+    Object.values(result.nativeSessionMetadata).some((item) => typeof item !== "string")
+  ) {
+    throw new WorkflowEngineError(
+      "invalid_request",
+      "Agent completion result envelope is invalid or contradicts its outcome.",
+    );
+  }
+};
 
 type SqlRow = Record<string, unknown>;
 interface WorkflowListCursor {
@@ -1967,6 +2008,7 @@ export class WorkflowEngine {
     readonly evidence: AgentCompletionEvidence;
     readonly recovery?: boolean;
   }): WorkflowDetail {
+    assertAgentCompletionEvidence(input.evidence);
     const completionDigest = digestJson(input.evidence);
     return this.#transaction(() => {
       const agent = this.#findAgentRun(input.agentRunId);
@@ -3528,12 +3570,21 @@ export class WorkflowEngine {
       }
       if (
         input.builder.objective.trim().length === 0 ||
+        input.builder.objective.length > SingleBuilderRequestLimits.objectiveCharacters ||
         input.builder.acceptanceCriteria.length === 0 ||
+        input.builder.acceptanceCriteria.length > SingleBuilderRequestLimits.acceptanceCriteria ||
         input.builder.acceptanceCriteria.some((criterion) => criterion.trim().length === 0) ||
+        input.builder.acceptanceCriteria.some(
+          (criterion) =>
+            criterion.length > SingleBuilderRequestLimits.acceptanceCriterionCharacters,
+        ) ||
         input.builder.allowedPaths.length === 0 ||
+        input.builder.allowedPaths.length > SingleBuilderRequestLimits.scopePaths ||
+        (input.builder.forbiddenPaths?.length ?? 0) > SingleBuilderRequestLimits.scopePaths ||
         input.builder.runtime.kind !== "codex" ||
         (input.builder.runtime.model !== undefined &&
-          input.builder.runtime.model.trim().length === 0) ||
+          (input.builder.runtime.model.trim().length === 0 ||
+            input.builder.runtime.model.length > SingleBuilderRequestLimits.modelCharacters)) ||
         !Number.isSafeInteger(input.builder.runtime.maximumRuntimeSeconds) ||
         input.builder.runtime.maximumRuntimeSeconds < 1 ||
         input.builder.runtime.maximumRuntimeSeconds > 86_400
@@ -3545,7 +3596,7 @@ export class WorkflowEngine {
         patterns.some(
           (pattern) =>
             pattern.trim().length === 0 ||
-            pattern.length > 512 ||
+            pattern.length > SingleBuilderRequestLimits.scopePathCharacters ||
             [...pattern].filter((character) => character === "*").length > 32 ||
             NodePath.isAbsolute(pattern) ||
             pattern.split(/[\\/]/u).includes(".."),
@@ -3666,7 +3717,7 @@ export class WorkflowEngine {
     readonly stageId: string;
     readonly now: string;
   }): void {
-    const builder = input.run.builderRequest as SingleBuilderRequest | undefined;
+    const builder = input.run.builderRequest;
     if (!builder || !input.run.validationCheckId || !input.workspace.canonicalWorktreePath) {
       throw new WorkflowEngineError(
         "invalid_transition",
@@ -4035,7 +4086,7 @@ export class WorkflowEngine {
       ? { validationCheckId: optionalString(row, "validation_check_id") }
       : {}),
     ...(row.builder_request_json
-      ? { builderRequest: parseJson<Record<string, unknown>>(row.builder_request_json) }
+      ? { builderRequest: parseJson<SingleBuilderRequest>(row.builder_request_json) }
       : {}),
     version: asNumber(row, "version"),
   });

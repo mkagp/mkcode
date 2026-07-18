@@ -121,6 +121,20 @@ console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 1 } 
         }),
       (cause) => cause instanceof AgentRuntimeError && cause.code === "runtime_session_not_found",
     );
+    const completionPath = NodePath.join(
+      root,
+      "state",
+      "agent-control",
+      started.session.executionId,
+      "completion.json",
+    );
+    const malformed = JSON.parse(await NodeFSP.readFile(completionPath, "utf8")) as {
+      result: Record<string, unknown>;
+    };
+    delete malformed.result.claimedChangedPaths;
+    await NodeFSP.writeFile(completionPath, `${JSON.stringify(malformed)}\n`, "utf8");
+    const rejectingRuntime = new CodexAgentRuntime({ stateRoot: NodePath.join(root, "state") });
+    NodeAssert.equal((await rejectingRuntime.reconcile(started.session)).state, "ambiguous");
   });
 
   it("uses the canonical working directory for subsequent session operations", async () => {

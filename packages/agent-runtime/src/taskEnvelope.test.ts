@@ -63,8 +63,15 @@ describe("builder task envelope", () => {
   });
 
   it("rejects absolute and escaping path patterns", () => {
+    NodeAssert.throws(() => validateScopePattern("./"), /project-relative/u);
     NodeAssert.throws(() => validateScopePattern("../outside"), /project-relative/u);
     NodeAssert.throws(() => validateScopePattern("/tmp/outside"), /project-relative/u);
+  });
+
+  it("normalizes context references and rejects observed POSIX backslashes", () => {
+    const result = validateBuilderTaskEnvelope(task({ contextFileReferences: ["./README.md"] }));
+    NodeAssert.deepEqual(result.contextFileReferences, ["README.md"]);
+    NodeAssert.throws(() => scopePatternMatches("src/**", "src\\payload.ts"), /project-relative/u);
   });
 
   it("bounds scope pattern size and wildcard complexity", () => {

@@ -81,12 +81,14 @@ const escapesWorkspace = async (root: string, path: string): Promise<boolean> =>
   let current = canonicalRoot;
   for (const segment of relative.split(NodePath.sep).filter((item) => item.length > 0)) {
     current = NodePath.join(current, segment);
+    let observed = false;
     try {
       await NodeFSP.lstat(current);
+      observed = true;
       const resolved = await NodeFSP.realpath(current);
       if (!isContained(canonicalRoot, resolved)) return true;
     } catch (cause) {
-      if ((cause as NodeJS.ErrnoException).code === "ENOENT") return false;
+      if ((cause as NodeJS.ErrnoException).code === "ENOENT") return observed;
       throw new AgentRuntimeError(
         "invalid_configuration",
         "Changed-path containment could not be verified safely.",

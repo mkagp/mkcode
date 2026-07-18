@@ -53,6 +53,7 @@ class FakeRuntime implements AgentRuntime {
   readonly #onStarted: (() => void) | undefined;
   readonly #onSessionRead: (() => void) | undefined;
   startedInput?: StartAgentInput;
+  readonly cancellations: Array<string> = [];
   constructor(root: string, onStarted?: () => void, onSessionRead?: () => void) {
     this.#root = root;
     this.#onStarted = onStarted;
@@ -78,7 +79,8 @@ class FakeRuntime implements AgentRuntime {
   wait() {
     return Promise.resolve(this.#completion());
   }
-  cancel() {
+  cancel(_session: AgentSessionReference, reason: string) {
+    this.cancellations.push(reason);
     return Promise.resolve();
   }
   reconcile() {
@@ -347,6 +349,7 @@ describe("AgentExecutionWorker", () => {
     NodeAssert.equal(detail.agentRuns[0]?.status, "cancelled");
     NodeAssert.equal(detail.commands.length, 0);
     NodeAssert.equal(detail.workspaces[0]?.status, "retained");
+    NodeAssert.ok(runtime.cancellations.includes("workflow_cancelled"));
     const building = detail.stages.find((stage) => stage.stageKey === "building");
     NodeAssert.equal(
       detail.attempts.find((attempt) => attempt.stageRunId === building?.id)?.status,
@@ -379,6 +382,7 @@ describe("AgentExecutionWorker", () => {
     NodeAssert.equal(detail.workflowRun.status, "cancelled");
     NodeAssert.equal(detail.agentRuns[0]?.status, "cancelled");
     NodeAssert.equal(detail.commands.length, 0);
+    NodeAssert.ok(runtime.cancellations.includes("workflow_cancelled"));
     const building = detail.stages.find((stage) => stage.stageKey === "building");
     NodeAssert.equal(
       detail.attempts.find((attempt) => attempt.stageRunId === building?.id)?.status,

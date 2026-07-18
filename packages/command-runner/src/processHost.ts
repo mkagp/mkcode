@@ -98,10 +98,6 @@ export class LocalProcessHost implements ProcessHost {
         child.once("spawn", onSpawn);
         child.once("error", onError);
       });
-      // A child may close stdin immediately after spawn. Keep a late EPIPE from becoming
-      // an unhandled stream error; process completion remains the durable runtime result.
-      child.stdin.on("error", () => undefined);
-      child.stdin.end(input.stdin);
       const record = { child, completion };
       this.#processes.set(executionId, record);
       void completion.finally(() => {
@@ -109,6 +105,28 @@ export class LocalProcessHost implements ProcessHost {
           this.#processes.delete(executionId);
         }
       });
+      try {
+        await new Promise<void>((resolve, reject) => {
+          let settled = false;
+          child.stdin.on("error", (cause: Error) => {
+            signalChild(record, "SIGKILL");
+            if (!settled) {
+              settled = true;
+              reject(cause);
+            }
+          });
+          child.stdin.end(input.stdin, () => {
+            if (!settled) {
+              settled = true;
+              resolve();
+            }
+          });
+        });
+      } catch (cause) {
+        signalChild(record, "SIGKILL");
+        await completion;
+        throw cause;
+      }
       return {
         executionId,
         ...(child.pid === undefined ? {} : { nativePid: child.pid }),

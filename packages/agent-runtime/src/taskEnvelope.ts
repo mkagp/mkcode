@@ -18,7 +18,7 @@ const assertText = (value: string, name: string): void => {
 };
 
 export const validateScopePattern = (value: string): string => {
-  const normalized = value.replaceAll("\\", "/").trim();
+  const normalized = value.replaceAll("\\", "/").trim().replace(/^\.\//u, "");
   const wildcardCount = [...normalized].filter((character) => character === "*").length;
   if (
     normalized.length === 0 ||
@@ -33,15 +33,16 @@ export const validateScopePattern = (value: string): string => {
       "Agent path patterns must be safe project-relative paths.",
     );
   }
-  return normalized.replace(/^\.\//u, "");
+  return normalized;
 };
 
 const normalizeScopePath = (value: string): string => {
-  const normalized = value.replaceAll("\\", "/").trim().replace(/^\.\//u, "");
+  const normalized = value.trim().replace(/^\.\//u, "");
   if (
     normalized.length === 0 ||
     normalized.length > MAX_SCOPE_PATH_LENGTH ||
     normalized.includes("\0") ||
+    normalized.includes("\\") ||
     NodePath.posix.isAbsolute(normalized) ||
     normalized.split("/").some((segment) => segment === "..")
   ) {
@@ -194,13 +195,14 @@ export const validateBuilderTaskEnvelope = (value: unknown): BuilderTaskEnvelope
       "Worktree path reference must be absolute.",
     );
   }
-  for (const reference of input.contextFileReferences) validateScopePattern(reference);
+  const contextFileReferences = input.contextFileReferences.map(validateScopePattern);
   return {
     ...input,
     objective: input.objective.trim(),
     task: { title: input.task.title.trim(), description: input.task.description.trim() },
     acceptanceCriteria: input.acceptanceCriteria.map((item) => item.trim()),
     scope: { allowedPaths, forbiddenPaths },
+    contextFileReferences,
   };
 };
 
