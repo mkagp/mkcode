@@ -438,18 +438,50 @@ export class CodexAgentRuntime implements AgentRuntime {
       ...(input.runtimeConfiguration.model ? ["--model", input.runtimeConfiguration.model] : []),
       "-",
     ];
+    const startedAt = nowIso();
+    const maximumRuntimeMilliseconds = task.maximumRuntimeSeconds * 1_000;
+    const timeoutDeadline = new Date(Date.now() + maximumRuntimeMilliseconds).toISOString();
     let hosted: HostedProcess;
+    let launchTimedOut = false;
+    let launchTimer: ReturnType<typeof NodeTimers.setTimeout> | undefined;
+    const launch = this.#host.start({
+      executionId: input.executionId,
+      executable: this.#executable,
+      args,
+      workingDirectory,
+      environment: safeEnvironment(this.#environment),
+      stdin: input.prompt,
+    });
     try {
-      hosted = await this.#host.start({
-        executionId: input.executionId,
-        executable: this.#executable,
-        args,
-        workingDirectory,
-        environment: safeEnvironment(this.#environment),
-        stdin: input.prompt,
-      });
+      const launchDeadline = Math.min(maximumRuntimeMilliseconds, START_TIMEOUT_MILLISECONDS);
+      hosted = await Promise.race([
+        launch,
+        new Promise<never>((_resolve, reject) => {
+          launchTimer = NodeTimers.setTimeout(() => {
+            launchTimedOut = true;
+            reject(
+              new AgentRuntimeError(
+                "runtime_start_failed",
+                "Codex runtime did not start before its launch deadline.",
+              ),
+            );
+          }, launchDeadline);
+          launchTimer.unref();
+        }),
+      ]);
     } catch (cause) {
+      if (launchTimedOut) {
+        void this.#host.interrupt(input.executionId).catch(() => undefined);
+        void this.#host.terminate(input.executionId).catch(() => undefined);
+        void launch
+          .then(async (lateProcess) => {
+            await this.#host.terminate(input.executionId);
+            await Promise.race([lateProcess.completion, delay(POST_TERMINATION_WAIT_MILLISECONDS)]);
+          })
+          .catch(() => undefined);
+      }
       await Promise.allSettled([capture.stdout.close(), capture.stderr.close()]);
+      if (cause instanceof AgentRuntimeError) throw cause;
       throw new AgentRuntimeError(
         (cause as NodeJS.ErrnoException).code === "ENOENT"
           ? "runtime_unavailable"
@@ -458,9 +490,9 @@ export class CodexAgentRuntime implements AgentRuntime {
           ? "Codex executable is unavailable."
           : "Codex runtime could not start.",
       );
+    } finally {
+      if (launchTimer) NodeTimers.clearTimeout(launchTimer);
     }
-    const startedAt = nowIso();
-    const timeoutDeadline = new Date(Date.now() + task.maximumRuntimeSeconds * 1_000).toISOString();
     const active: ActiveRecord = {
       input: { ...input, workingDirectory },
       hosted,
@@ -476,9 +508,10 @@ export class CodexAgentRuntime implements AgentRuntime {
     };
     active.completion = this.#monitor(active, capture);
     this.#active.set(input.executionId, active);
+    const remainingRuntimeMilliseconds = Math.max(0, Date.parse(timeoutDeadline) - Date.now());
     active.timeout = NodeTimers.setTimeout(() => {
       void this.#requestStop(active, "timed_out");
-    }, task.maximumRuntimeSeconds * 1_000);
+    }, remainingRuntimeMilliseconds);
     active.timeout.unref();
     const receipt = await Promise.race([
       this.#waitForSession(active),
@@ -605,60 +638,101 @@ export class CodexAgentRuntime implements AgentRuntime {
     record: ActiveRecord,
     capture: Awaited<ReturnType<CommandOutputStore["createCapture"]>>,
   ): Promise<AgentRuntimeCompletion> {
-    const stdoutDone = this.#consumeStdout(record, capture.stdout);
-    const stderrDone = (async () => {
-      for await (const chunk of record.hosted.stderr) capture.stderr.write(Buffer.from(chunk));
-    })();
-    const [exit] = await Promise.all([record.hosted.completion, stdoutDone, stderrDone]);
-    if (record.timeout) NodeTimers.clearTimeout(record.timeout);
-    const [stdout, stderr] = await Promise.all([capture.stdout.close(), capture.stderr.close()]);
-    const structured = parseStructuredResult(record.finalMessage, record.input.redactionValues);
-    const completedAt = nowIso();
-    const outcome =
-      record.stopReason === "timed_out"
-        ? "timed_out"
-        : record.stopReason === "cancelled"
-          ? "cancelled"
-          : exit.exitCode === 0 && record.turnCompleted && !record.protocolFailed && structured
-            ? structured.status
-            : "failed";
-    const result: AgentResultEnvelope = {
-      version: 1,
-      agentRunId: record.input.task.agentRunId,
-      runtimeSessionReference: record.nativeSessionId ?? "unconfirmed",
-      status: outcome,
-      summary: structured?.summary ?? "Codex did not return a valid structured result.",
-      claimedChangedPaths: structured?.claimedChangedPaths ?? [],
-      claimedTestsChanged: structured?.claimedTestsChanged ?? [],
-      unresolvedIssues: structured?.unresolvedIssues ?? [],
-      questionsOrBlockers: structured?.questionsOrBlockers ?? [],
-      runtimeCompletionReason:
-        record.stopReason ?? (record.turnCompleted ? "turn_completed" : "process_exited"),
-      nativeSessionMetadata: { runtime: "codex", protocol: "exec-jsonl" },
-      startedAt: record.startedAt,
-      completedAt,
-    };
-    const completion: AgentRuntimeCompletion = {
-      outcome,
-      result,
-      exitCode: exit.exitCode,
-      signal: exit.signal,
-      stdout,
-      stderr,
-    };
-    this.#appendEvent(record, `agent.${outcome}`, { exitCode: exit.exitCode ?? -1 });
-    await this.#writeEvents(record.input.executionId, {
-      events: record.events,
-      nextCursor: record.eventCursor,
-    });
-    await this.#writeCompletion(record.input.executionId, completion);
-    if (this.#active.get(record.input.executionId) === record) {
-      this.#active.delete(record.input.executionId);
-      delete record.finalMessage;
-      record.events.splice(0);
-      record.eventBytes = 0;
+    let monitorFailure: unknown;
+    let exit = { exitCode: null, signal: null } as Awaited<typeof record.hosted.completion>;
+    let stdout: AgentRuntimeCompletion["stdout"] | undefined;
+    let stderr: AgentRuntimeCompletion["stderr"] | undefined;
+    try {
+      const stopOnStreamFailure = async <T>(operation: Promise<T>): Promise<T> =>
+        operation.catch(async (cause) => {
+          monitorFailure ??= cause;
+          await this.#host.terminate(record.input.executionId).catch(() => undefined);
+          throw cause;
+        });
+      const stdoutDone = stopOnStreamFailure(this.#consumeStdout(record, capture.stdout));
+      const stderrDone = stopOnStreamFailure(
+        (async () => {
+          for await (const chunk of record.hosted.stderr) capture.stderr.write(Buffer.from(chunk));
+        })(),
+      );
+      const settled = await Promise.allSettled([record.hosted.completion, stdoutDone, stderrDone]);
+      if (settled[0].status === "fulfilled") exit = settled[0].value;
+      else monitorFailure ??= settled[0].reason;
+      if (settled[1].status === "rejected") monitorFailure ??= settled[1].reason;
+      if (settled[2].status === "rejected") monitorFailure ??= settled[2].reason;
+
+      const artifacts = await Promise.allSettled([capture.stdout.close(), capture.stderr.close()]);
+      if (artifacts[0].status === "fulfilled") stdout = artifacts[0].value;
+      else monitorFailure ??= artifacts[0].reason;
+      if (artifacts[1].status === "fulfilled") stderr = artifacts[1].value;
+      else monitorFailure ??= artifacts[1].reason;
+      if (!stdout || !stderr) {
+        throw new AgentRuntimeError(
+          "runtime_ambiguous",
+          "Codex output evidence could not be finalized.",
+        );
+      }
+
+      const structured = parseStructuredResult(record.finalMessage, record.input.redactionValues);
+      const completedAt = nowIso();
+      const outcome =
+        record.stopReason === "timed_out"
+          ? "timed_out"
+          : record.stopReason === "cancelled"
+            ? "cancelled"
+            : monitorFailure
+              ? "failed"
+              : exit.exitCode === 0 && record.turnCompleted && !record.protocolFailed && structured
+                ? structured.status
+                : "failed";
+      const result: AgentResultEnvelope = {
+        version: 1,
+        agentRunId: record.input.task.agentRunId,
+        runtimeSessionReference: record.nativeSessionId ?? "unconfirmed",
+        status: outcome,
+        summary: monitorFailure
+          ? "Codex runtime output monitoring failed."
+          : (structured?.summary ?? "Codex did not return a valid structured result."),
+        claimedChangedPaths: monitorFailure ? [] : (structured?.claimedChangedPaths ?? []),
+        claimedTestsChanged: monitorFailure ? [] : (structured?.claimedTestsChanged ?? []),
+        unresolvedIssues: monitorFailure ? [] : (structured?.unresolvedIssues ?? []),
+        questionsOrBlockers: monitorFailure ? [] : (structured?.questionsOrBlockers ?? []),
+        runtimeCompletionReason:
+          record.stopReason ??
+          (monitorFailure
+            ? "output_monitor_failed"
+            : record.turnCompleted
+              ? "turn_completed"
+              : "process_exited"),
+        nativeSessionMetadata: { runtime: "codex", protocol: "exec-jsonl" },
+        startedAt: record.startedAt,
+        completedAt,
+      };
+      const completion: AgentRuntimeCompletion = {
+        outcome,
+        result,
+        exitCode: exit.exitCode,
+        signal: exit.signal,
+        stdout,
+        stderr,
+      };
+      this.#appendEvent(record, `agent.${outcome}`, { exitCode: exit.exitCode ?? -1 });
+      await this.#writeEvents(record.input.executionId, {
+        events: record.events,
+        nextCursor: record.eventCursor,
+      });
+      await this.#writeCompletion(record.input.executionId, completion);
+      return completion;
+    } finally {
+      if (record.timeout) NodeTimers.clearTimeout(record.timeout);
+      await Promise.allSettled([capture.stdout.close(), capture.stderr.close()]);
+      if (this.#active.get(record.input.executionId) === record) {
+        this.#active.delete(record.input.executionId);
+        delete record.finalMessage;
+        record.events.splice(0);
+        record.eventBytes = 0;
+      }
     }
-    return completion;
   }
 
   async #consumeStdout(

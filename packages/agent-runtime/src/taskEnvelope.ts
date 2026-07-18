@@ -37,7 +37,9 @@ export const validateScopePattern = (value: string): string => {
 };
 
 const normalizeScopePath = (value: string): string => {
-  const normalized = value.trim().replace(/^\.\//u, "");
+  // Observed Git paths are filesystem identities. Whitespace is significant and must not
+  // be normalized away before policy matching.
+  const normalized = value.replace(/^\.\//u, "");
   if (
     normalized.length === 0 ||
     normalized.length > MAX_SCOPE_PATH_LENGTH ||

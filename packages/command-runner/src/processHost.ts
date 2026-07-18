@@ -105,23 +105,14 @@ export class LocalProcessHost implements ProcessHost {
           this.#processes.delete(executionId);
         }
       });
+      // Return the readable streams without waiting for stdin to flush. A child may apply
+      // output backpressure before it finishes reading stdin; awaiting the write here would
+      // prevent the caller from draining that output.
+      child.stdin.on("error", () => {
+        signalChild(record, "SIGKILL");
+      });
       try {
-        await new Promise<void>((resolve, reject) => {
-          let settled = false;
-          child.stdin.on("error", (cause: Error) => {
-            signalChild(record, "SIGKILL");
-            if (!settled) {
-              settled = true;
-              reject(cause);
-            }
-          });
-          child.stdin.end(input.stdin, () => {
-            if (!settled) {
-              settled = true;
-              resolve();
-            }
-          });
-        });
+        child.stdin.end(input.stdin);
       } catch (cause) {
         signalChild(record, "SIGKILL");
         await completion;

@@ -1,10 +1,13 @@
 // @effect-diagnostics nodeBuiltinImport:off
+// @effect-diagnostics globalTimers:off -- Synthetic process-host events exercise runtime races.
 import * as NodeAssert from "node:assert/strict";
 import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
+import * as NodeStream from "node:stream";
 
 import { afterEach, describe, it } from "@effect/vitest";
+import type { ProcessExit, ProcessHost, ProcessStatus } from "@mkcode/command-runner";
 
 import type { BuilderTaskEnvelope, StartAgentInput } from "./contracts.ts";
 import { AgentRuntimeError } from "./contracts.ts";
@@ -281,5 +284,84 @@ setInterval(() => {}, 1000);
       state: "ambiguous",
       reason: "Local Codex process ownership cannot be proven after worker restart.",
     });
+  });
+
+  it("persists a failed completion and releases the session when output monitoring fails", async () => {
+    const root = await makeRoot();
+    const stdout = new NodeStream.PassThrough();
+    const stderr = new NodeStream.PassThrough();
+    let running = true;
+    let resolveCompletion!: (exit: ProcessExit) => void;
+    const completion = new Promise<ProcessExit>((resolve) => {
+      resolveCompletion = resolve;
+    });
+    const stop = () => {
+      if (!running) return;
+      running = false;
+      stdout.destroy();
+      stderr.end();
+      resolveCompletion({ exitCode: null, signal: "SIGKILL" });
+    };
+    const host: ProcessHost = {
+      type: "test",
+      start: async (input) => {
+        setTimeout(() => {
+          stdout.write(
+            `${JSON.stringify({ type: "thread.started", thread_id: "thread-stream" })}\n`,
+          );
+          setTimeout(() => stdout.destroy(new Error("synthetic stream failure")), 25);
+        }, 0);
+        return {
+          executionId: input.executionId ?? "execution-1",
+          stdout,
+          stderr,
+          completion,
+        };
+      },
+      status: async (): Promise<ProcessStatus> =>
+        running ? { state: "running" } : { state: "exited", exitCode: null, signal: "SIGKILL" },
+      interrupt: async () => stop(),
+      terminate: async () => stop(),
+    };
+    const stateRoot = NodePath.join(root, "state");
+    const runtime = new CodexAgentRuntime({ stateRoot, processHost: host });
+    const started = await runtime.start(startInput(root));
+    const result = await runtime.wait(started.session);
+    NodeAssert.equal(result.outcome, "failed");
+    NodeAssert.equal(result.result.runtimeCompletionReason, "output_monitor_failed");
+    NodeAssert.equal((await runtime.status(started.session)).state, "completed");
+
+    const restarted = new CodexAgentRuntime({ stateRoot });
+    NodeAssert.equal((await restarted.reconcile(started.session)).state, "completed");
+  });
+
+  it("bounds process-host startup by the task runtime deadline", async () => {
+    const root = await makeRoot();
+    let interruptCount = 0;
+    let terminateCount = 0;
+    const host: ProcessHost = {
+      type: "test",
+      start: () => new Promise(() => undefined),
+      status: async () => ({ state: "unknown" }),
+      interrupt: async () => {
+        interruptCount += 1;
+      },
+      terminate: async () => {
+        terminateCount += 1;
+      },
+    };
+    const runtime = new CodexAgentRuntime({
+      stateRoot: NodePath.join(root, "state"),
+      processHost: host,
+    });
+    await NodeAssert.rejects(
+      () => runtime.start(startInput(root, 1)),
+      (cause) =>
+        cause instanceof AgentRuntimeError &&
+        cause.code === "runtime_start_failed" &&
+        /launch deadline/u.test(cause.message),
+    );
+    NodeAssert.equal(interruptCount, 1);
+    NodeAssert.equal(terminateCount, 1);
   });
 });

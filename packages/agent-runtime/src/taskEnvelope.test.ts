@@ -74,6 +74,11 @@ describe("builder task envelope", () => {
     NodeAssert.throws(() => scopePatternMatches("src/**", "src\\payload.ts"), /project-relative/u);
   });
 
+  it("preserves significant whitespace in observed Git paths", () => {
+    NodeAssert.equal(scopePatternMatches("src/allowed", "src/allowed"), true);
+    NodeAssert.equal(scopePatternMatches("src/allowed", "src/allowed "), false);
+  });
+
   it("bounds scope pattern size and wildcard complexity", () => {
     NodeAssert.throws(() => validateScopePattern("a".repeat(513)), /project-relative/u);
     NodeAssert.throws(() => validateScopePattern("src/" + "*".repeat(33)), /project-relative/u);
