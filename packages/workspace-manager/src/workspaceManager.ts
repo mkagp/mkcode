@@ -142,6 +142,18 @@ export interface WorkspaceRemovalResult {
   readonly reason?: "already_removed" | "modified" | "locked" | "ownership_mismatch";
 }
 
+export interface WorkspaceGitEvidence {
+  readonly head: string;
+  readonly branch: string;
+  readonly baseCommit: string;
+  readonly trackedChangedPaths: ReadonlyArray<string>;
+  readonly untrackedPaths: ReadonlyArray<string>;
+  readonly dirty: boolean;
+  readonly diffSummary: string;
+  readonly localConfigurationDigest: string;
+  readonly ownershipMarkerDigest: string;
+}
+
 export interface WorkspaceManager {
   plan(input: {
     readonly workspaceId: string;
@@ -157,6 +169,7 @@ export interface WorkspaceManager {
   allocate(plan: WorkspaceAllocationPlan): Promise<AllocatedWorkspace>;
   resume(input: InspectWorkspaceInput): Promise<AllocatedWorkspace>;
   inspect(input: InspectWorkspaceInput): Promise<WorkspaceInspection>;
+  captureGitEvidence(input: InspectWorkspaceInput): Promise<WorkspaceGitEvidence>;
   discardAllocationClaim(input: InspectWorkspaceInput): Promise<void>;
   retain(input: InspectWorkspaceInput): Promise<WorkspaceInspection>;
   remove(input: InspectWorkspaceInput): Promise<WorkspaceRemovalResult>;
@@ -165,6 +178,7 @@ export interface WorkspaceManager {
 interface WorkspaceManagerHooks {
   readonly afterWorktreeAdded?: () => void | Promise<void>;
   readonly beforeOwnershipMarkerPublished?: () => void | Promise<void>;
+  readonly beforeEvidenceStabilityCheck?: () => void | Promise<void>;
 }
 
 interface GitResult {
@@ -1050,6 +1064,114 @@ export class GitWorktreeWorkspaceManager implements WorkspaceManager {
       locked: metadata.locked,
       gitMetadataState: "registered",
     };
+  }
+
+  async captureGitEvidence(input: InspectWorkspaceInput): Promise<WorkspaceGitEvidence> {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const inspection = await this.inspect(input);
+      if (
+        inspection.state !== "matching" ||
+        !inspection.canonicalPath ||
+        !inspection.observedHead ||
+        !inspection.observedBranch ||
+        !inspection.ownershipMarkerPath
+      ) {
+        throw new WorkspaceManagerError(
+          "ownership_mismatch",
+          inspection.reason ?? "Workspace ownership could not be proven before Git inspection.",
+        );
+      }
+      const root = inspection.canonicalPath;
+      const snapshot = async () => {
+        const [head, branch, status, localConfiguration] = await Promise.all([
+          runGit(["-C", root, "rev-parse", "HEAD"]),
+          runGit(["-C", root, "symbolic-ref", "--quiet", "--short", "HEAD"]),
+          runGit([
+            "-C",
+            root,
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "--untracked-files=all",
+            "--no-renames",
+          ]),
+          runGit(["-C", root, "config", "--local", "--null", "--list"]),
+        ]);
+        return {
+          head: head.stdout.trim(),
+          headTruncated: head.stdoutTruncated,
+          branch: branch.stdout.trim(),
+          branchTruncated: branch.stdoutTruncated,
+          status: status.stdout,
+          statusTruncated: status.stdoutTruncated,
+          localConfiguration: localConfiguration.stdout,
+          localConfigurationTruncated: localConfiguration.stdoutTruncated,
+        };
+      };
+      const before = await snapshot();
+      await this.#hooks.beforeEvidenceStabilityCheck?.();
+      const after = await snapshot();
+      if (
+        before.headTruncated ||
+        before.branchTruncated ||
+        before.statusTruncated ||
+        before.localConfigurationTruncated ||
+        after.headTruncated ||
+        after.branchTruncated ||
+        after.statusTruncated ||
+        after.localConfigurationTruncated
+      ) {
+        throw new WorkspaceManagerError(
+          "ownership_ambiguous",
+          "Git evidence exceeded the collection limit.",
+        );
+      }
+      if (
+        before.head !== after.head ||
+        before.branch !== after.branch ||
+        before.status !== after.status ||
+        before.localConfiguration !== after.localConfiguration ||
+        after.head !== inspection.observedHead ||
+        after.branch !== inspection.observedBranch
+      ) {
+        continue;
+      }
+      const entries = after.status.split("\0").filter((entry) => entry.length > 0);
+      const trackedChangedPaths: Array<string> = [];
+      const untrackedPaths: Array<string> = [];
+      const summary: Array<string> = [];
+      for (const entry of entries) {
+        if (entry.length < 4 || entry[2] !== " ") {
+          throw new WorkspaceManagerError(
+            "ownership_ambiguous",
+            "Git returned an unsupported workspace status entry.",
+          );
+        }
+        const status = entry.slice(0, 2);
+        const path = entry.slice(3);
+        (status === "??" ? untrackedPaths : trackedChangedPaths).push(path);
+        summary.push(`${status} ${path}`);
+      }
+      trackedChangedPaths.sort();
+      untrackedPaths.sort();
+      return {
+        head: after.head,
+        branch: after.branch,
+        baseCommit: input.resolvedBaseCommit,
+        trackedChangedPaths,
+        untrackedPaths,
+        dirty: entries.length > 0,
+        diffSummary: summary.join("\n").slice(0, 16_384),
+        localConfigurationDigest: NodeCrypto.createHash("sha256")
+          .update(after.localConfiguration)
+          .digest("hex"),
+        ownershipMarkerDigest: input.ownershipMarkerDigest,
+      };
+    }
+    throw new WorkspaceManagerError(
+      "ownership_ambiguous",
+      "Workspace Git evidence changed repeatedly during collection.",
+    );
   }
 
   async discardAllocationClaim(input: InspectWorkspaceInput): Promise<void> {

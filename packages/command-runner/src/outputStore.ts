@@ -8,6 +8,7 @@ import * as NodeProcess from "node:process";
 import { StreamingRedactor } from "./redactor.ts";
 
 const SAFE_EXECUTION_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
+const SAFE_OUTPUT_DIRECTORY = /^[a-z][a-z0-9-]{0,63}$/u;
 export const DEFAULT_MAX_OUTPUT_BYTES_PER_STREAM = 1_048_576;
 export const MAX_OUTPUT_PAGE_BYTES = 65_536;
 const MIN_OUTPUT_PAGE_BYTES = 4;
@@ -65,11 +66,20 @@ const openPrivateOutput = async (path: string): Promise<NodeFSP.FileHandle> =>
 export class CommandOutputStore {
   readonly stateRoot: string;
   readonly outputRoot: string;
+  readonly outputDirectoryName: string;
   readonly #maximumBytesPerStream: number;
 
-  constructor(input: { readonly stateRoot: string; readonly maximumBytesPerStream?: number }) {
+  constructor(input: {
+    readonly stateRoot: string;
+    readonly maximumBytesPerStream?: number;
+    readonly outputDirectoryName?: string;
+  }) {
     this.stateRoot = NodePath.resolve(input.stateRoot);
-    this.outputRoot = NodePath.join(this.stateRoot, "command-output");
+    this.outputDirectoryName = input.outputDirectoryName ?? "command-output";
+    if (!SAFE_OUTPUT_DIRECTORY.test(this.outputDirectoryName)) {
+      throw new TypeError("Output directory name is unsafe.");
+    }
+    this.outputRoot = NodePath.join(this.stateRoot, this.outputDirectoryName);
     this.#maximumBytesPerStream =
       input.maximumBytesPerStream ?? DEFAULT_MAX_OUTPUT_BYTES_PER_STREAM;
     if (!Number.isSafeInteger(this.#maximumBytesPerStream) || this.#maximumBytesPerStream < 1) {
@@ -85,8 +95,8 @@ export class CommandOutputStore {
       throw new TypeError("Process-host execution ID is unsafe for artifact storage.");
     }
     return {
-      stdout: `command-output/${executionId}/stdout.log`,
-      stderr: `command-output/${executionId}/stderr.log`,
+      stdout: `${this.outputDirectoryName}/${executionId}/stdout.log`,
+      stderr: `${this.outputDirectoryName}/${executionId}/stderr.log`,
     };
   }
 
@@ -152,14 +162,14 @@ export class CommandOutputStore {
     const normalizedReference = input.locationReference.replaceAll("\\", "/");
     const [directory, executionId, filename, ...extra] = normalizedReference.split("/");
     if (
-      directory !== "command-output" ||
+      directory !== this.outputDirectoryName ||
       !executionId ||
       !SAFE_EXECUTION_ID.test(executionId) ||
       (filename !== "stdout.log" && filename !== "stderr.log") ||
       extra.length > 0
     ) {
       throw new TypeError(
-        "Output artifact reference is not a generated command output or escapes factory state.",
+        "Output artifact reference is not generated command output for this store or escapes factory state.",
       );
     }
     const executionDirectory = NodePath.join(this.outputRoot, executionId);

@@ -15,6 +15,7 @@ export interface ProcessStartInput {
   readonly args: ReadonlyArray<string>;
   readonly workingDirectory: string;
   readonly environment: Readonly<Record<string, string>>;
+  readonly stdin?: string;
 }
 
 export interface HostedProcess {
@@ -41,7 +42,7 @@ export interface ProcessHost {
 
 interface LocalProcessRecord {
   readonly child: NodeChildProcess.ChildProcessByStdio<
-    null,
+    NodeStream.Writable,
     NodeStream.Readable,
     NodeStream.Readable
   >;
@@ -79,7 +80,7 @@ export class LocalProcessHost implements ProcessHost {
         env: { ...input.environment },
         shell: false,
         detached: NodeProcess.platform === "linux",
-        stdio: ["ignore", "pipe", "pipe"],
+        stdio: ["pipe", "pipe", "pipe"],
         windowsHide: true,
       });
       const completion = new Promise<ProcessExit>((resolve) => {
@@ -97,6 +98,7 @@ export class LocalProcessHost implements ProcessHost {
         child.once("spawn", onSpawn);
         child.once("error", onError);
       });
+      child.stdin.end(input.stdin);
       const record = { child, completion };
       this.#processes.set(executionId, record);
       void completion.finally(() => {
